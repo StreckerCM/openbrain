@@ -1,0 +1,90 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openbrain
+      POSTGRES_USER: openbrain
+      POSTGRES_PASSWORD: openbrain-db-2026
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openbrain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgrest:
+    image: postgrest/postgrest:latest
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgresql://openbrain:openbrain-db-2026@db:5432/openbrain
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: openbrain
+      PGRST_JWT_SECRET: 89841f9e067dff74109955dea763fb3052054d9ce14715b40bd1c87a5fe4a013
+      PGRST_SERVER_PORT: 3000
+    ports:
+      - "3006:3000"
+    networks:
+      - default
+      - nginxproxymanager_default
+    depends_on:
+      db:
+        condition: service_healthy
+
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    networks:
+      - default
+      - nginxproxymanager_default
+    depends_on:
+      db:
+        condition: service_healthy
+
+  mcp-gateway:
+    build: ./mcp-gateway
+    restart: unless-stopped
+    ports:
+      - "3007:3001"
+    networks:
+      - default
+      - nginxproxymanager_default
+    depends_on:
+      db:
+        condition: service_healthy
+
+  embedder:
+    build: ./embedder
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: openbrain
+      DB_PASS: openbrain-db-2026
+      POLL_INTERVAL: "30"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  docs:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./docs:/usr/share/nginx/html:ro
+    networks:
+      - nginxproxymanager_default
+
+networks:
+  nginxproxymanager_default:
+    external: true
+
+volumes:
+  pgdata:
+
