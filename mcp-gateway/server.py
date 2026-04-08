@@ -62,15 +62,15 @@ async def _apply_schema() -> None:
     )
     try:
         await conn.execute(schema_sql)
-        print("[schema] init.sql applied successfully")
+        print("[schema] init.sql applied successfully", flush=True)
     except Exception as e:
-        print(f"[schema] WARNING: batch execute failed: {e}")
-        print("[schema] Attempting statements individually...")
+        print(f"[schema] WARNING: batch execute failed: {e}", flush=True)
+        print("[schema] Attempting statements individually...", flush=True)
         for stmt in _split_sql(schema_sql):
             try:
                 await conn.execute(stmt)
             except Exception as stmt_err:
-                print(f"[schema] Skipped statement: {stmt_err}")
+                print(f"[schema] Skipped statement: {stmt_err}", flush=True)
     finally:
         await conn.close()
 
@@ -523,5 +523,7 @@ async def list_memories(
 
 if __name__ == "__main__":
     import asyncio
+    print("[startup] Applying database schema...", flush=True)
     asyncio.run(_apply_schema())
+    print("[startup] Starting MCP server...", flush=True)
     mcp.run(transport="streamable-http")
