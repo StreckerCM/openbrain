@@ -1,0 +1,241 @@
+# OpenBrain
+
+A shared knowledge base for Strecker development projects. Stores structured knowledge entries, project metadata, and shared resources with vector embeddings for semantic search. Agents access it via an **MCP gateway** (Model Context Protocol) or a **PostgREST API**.
+
+## Architecture
+
+```
+Claude Code / Agent
+        ↓ stdio
+  supergateway (local)          ← converts stdio ↔ Streamable HTTP
+        ↓ Streamable HTTP
+  Nginx Reverse Proxy
+        ↓
+  supergateway (Docker)         ← converts Streamable HTTP ↔ stdio
+        ↓ stdio
+  mcp-server-postgres
+        ↓
+  PostgreSQL + pgvector
+```
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [Node.js](https://nodejs.org/) 18+ (for client-side MCP connection)
+- An [OpenAI API key](https://platform.openai.com/api-keys) (for the embedder service)
+- Network access to the host running the stack (LAN, Tailscale, or WireGuard)
+
+## Server Setup
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/StreckerCM/openbrain.git
+cd openbrain
+```
+
+Create a `.env` file in the project root with your OpenAI API key:
+
+```env
+OPENAI_API_KEY=sk-your-key-here
+```
+
+This is used by the embedder service to generate vector embeddings for semantic search.
+
+### 2. Start the stack
+
+```bash
+docker compose up -d --build
+```
+
+This launches five services:
+
+| Service | Port | Description |
+|---------|------|-------------|
+| **db** | 5433 | PostgreSQL 17 with pgvector extension |
+| **mcp-gateway** | 3007 | MCP Streamable HTTP endpoint (supergateway + mcp-server-postgres) |
+| **postgrest** | 3006 | REST API over the database |
+| **embedder** | — | Background service that generates vector embeddings every 30s |
+| **adminer** | — | Web-based database browser |
+| **docs** | — | Nginx serving the docs directory |
+
+> **Note:** The compose file references an external `nginxproxymanager_default` network for reverse proxy integration. If you're not using Nginx Proxy Manager, remove the `networks: nginxproxymanager_default` references from `docker-compose.yml` and access services directly on their mapped ports.
+
+### 3. Verify
+
+```bash
+# Check all services are running
+docker compose ps
+
+# Test the MCP gateway (should return a JSON response)
+curl -X POST http://localhost:3007/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# Test PostgREST
+curl http://localhost:3006/projects
+```
+
+## Client Setup (Connecting Claude Code)
+
+Claude Code communicates with MCP servers over **stdio**. Since the OpenBrain MCP gateway speaks **Streamable HTTP**, you need [supergateway](https://github.com/supercorp-ai/supergateway) running locally to bridge the two protocols.
+
+### Option A: Using npx (recommended, no install needed)
+
+Add this to your Claude Code MCP config (`~/.claude/mcp.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "openbrain": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway",
+        "--streamableHttp",
+        "https://brain.streckercm.com/mcp/"
+      ]
+    }
+  }
+}
+```
+
+The `-y` flag auto-confirms the install on first run. After that, npx uses the cached version.
+
+### Option B: Global install
+
+If you prefer not to use npx, install supergateway globally:
+
+```bash
+npm install -g supergateway
+```
+
+Then configure Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "openbrain": {
+      "command": "supergateway",
+      "args": [
+        "--streamableHttp",
+        "https://brain.streckercm.com/mcp/"
+      ]
+    }
+  }
+}
+```
+
+### Option C: Local development (direct to Docker)
+
+If you're running the stack locally, point to `localhost` instead:
+
+```json
+{
+  "mcpServers": {
+    "openbrain": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway",
+        "--streamableHttp",
+        "http://localhost:3007/"
+      ]
+    }
+  }
+}
+```
+
+> **Important:** The trailing slash on the URL is required.
+
+### Verify the connection
+
+After configuring, restart Claude Code and check that the MCP tools are available:
+
+```
+/mcp
+```
+
+You should see three tools: `query`, `list_tables`, and `describe_table`.
+
+## Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `query` | Execute any SQL query (SELECT, INSERT, UPDATE, DELETE) |
+| `list_tables` | List all tables in the database |
+| `describe_table` | Get the schema for a specific table |
+
+## Database Schema
+
+### `knowledge` — Project-specific entries
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | serial | Primary key |
+| `project` | text | Project name (`DownholePro`, `GeoMagSharp`, `XactSpot-MSA`) |
+| `category` | text | Entry category (`algorithms`, `constants`, `error-models`, etc.) |
+| `title` | text | Short title |
+| `content` | text | Full content |
+| `tags` | text[] | Searchable tags |
+| `embedding` | vector(1536) | Auto-generated by embedder — do not set manually |
+| `created_at` | timestamptz | Auto-set |
+| `updated_at` | timestamptz | Auto-set |
+
+### `shared_resources` — Cross-project references
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | serial | Primary key |
+| `resource_type` | text | Category (`constants`, `algorithms`, `error-models`, etc.) |
+| `name` | text | Short name |
+| `description` | text | Full content |
+| `url` | text | Optional reference URL |
+| `projects` | text[] | Applicable projects (empty = all) |
+| `metadata` | jsonb | Flexible extra data |
+| `embedding` | vector(1536) | Auto-generated |
+
+### `projects` — Project registry
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | serial | Primary key |
+| `name` | text | Unique project name |
+| `description` | text | Project description |
+| `repo_url` | text | Repository URL |
+| `tech_stack` | text[] | Technologies used |
+| `notes` | text | Freeform notes |
+
+## Common Queries
+
+```sql
+-- List all entries for a project
+SELECT id, title, category, tags FROM knowledge
+WHERE project = 'DownholePro' ORDER BY category, title;
+
+-- Full text search
+SELECT id, title, content FROM knowledge
+WHERE content ILIKE '%ISCWSA%';
+
+-- Insert a knowledge entry
+INSERT INTO knowledge (project, category, title, content, tags)
+VALUES ('DownholePro', 'algorithms', 'Title', 'Content...', ARRAY['tag1','tag2']);
+
+-- Get shared resources for a project
+SELECT name, resource_type, description FROM shared_resources
+WHERE 'DownholePro' = ANY(projects) OR projects = '{}';
+```
+
+## Network Access
+
+Access is restricted to:
+
+| Network | CIDR |
+|---------|------|
+| LAN | `192.168.1.0/24` |
+| Tailscale | `100.72.222.0/24`, `100.87.233.84` |
+| WireGuard | `10.0.0.0/24` |
+
+## Additional Documentation
+
+See [docs/readme.md](docs/readme.md) for the full agent reference including PostgREST API examples, semantic search, and the embedder service details.
