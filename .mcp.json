@@ -1,8 +1,16 @@
 {
   "mcpServers": {
     "openbrain": {
-      "type": "http",
-      "url": "https://brain.streckercm.com/mcp/"
+      "command": "C:\\nvm4w\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "supergateway",
+        "--streamableHttp",
+        "https://brain.streckercm.com/mcp/"
+      ],
+      "env": {
+        "PATH": "C:\\nvm4w\\nodejs;${PATH}"
+      }
     }
   }
 }
