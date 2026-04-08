@@ -50,33 +50,37 @@ def _split_sql(sql: str) -> list[str]:
     return statements
 
 
+async def _apply_schema() -> None:
+    """Apply init.sql schema eagerly at process start (before MCP server)."""
+    if not os.path.exists(SCHEMA_FILE):
+        return
+    with open(SCHEMA_FILE) as f:
+        schema_sql = f.read()
+    conn = await asyncpg.connect(
+        host=DB_HOST, port=DB_PORT, database=DB_NAME,
+        user=DB_USER, password=DB_PASS,
+    )
+    try:
+        await conn.execute(schema_sql)
+        print("[schema] init.sql applied successfully")
+    except Exception as e:
+        print(f"[schema] WARNING: batch execute failed: {e}")
+        print("[schema] Attempting statements individually...")
+        for stmt in _split_sql(schema_sql):
+            try:
+                await conn.execute(stmt)
+            except Exception as stmt_err:
+                print(f"[schema] Skipped statement: {stmt_err}")
+    finally:
+        await conn.close()
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     pool = await asyncpg.create_pool(
         host=DB_HOST, port=DB_PORT, database=DB_NAME,
         user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
     )
-    # Run schema migrations on startup (all DDL is idempotent)
-    if os.path.exists(SCHEMA_FILE):
-        with open(SCHEMA_FILE) as f:
-            schema_sql = f.read()
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(schema_sql)
-            print("[schema] init.sql applied successfully")
-        except Exception as e:
-            print(f"[schema] WARNING: init.sql failed: {e}")
-            print("[schema] Attempting statements individually...")
-            # Fall back to running each statement separately so partial
-            # failures (e.g. IVFFlat index on empty table) don't block
-            # the rest of the schema from being applied.
-            statements = _split_sql(schema_sql)
-            async with pool.acquire() as conn:
-                for stmt in statements:
-                    try:
-                        await conn.execute(stmt)
-                    except Exception as stmt_err:
-                        print(f"[schema] Skipped statement: {stmt_err}")
     async with httpx.AsyncClient() as http:
         try:
             yield AppContext(pool=pool, http=http)
@@ -518,4 +522,6 @@ async def list_memories(
 
 
 if __name__ == "__main__":
+    import asyncio
+    asyncio.run(_apply_schema())
     mcp.run(transport="streamable-http")
