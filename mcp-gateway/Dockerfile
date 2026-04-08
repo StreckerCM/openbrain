@@ -1,5 +1,7 @@
-FROM node:22-slim
+FROM python:3.12-slim
 WORKDIR /app
-RUN npm install -g @modelcontextprotocol/server-postgres supergateway
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY server.py .
 EXPOSE 3001
-CMD ["supergateway", "--stdio", "mcp-server-postgres postgresql://openbrain:openbrain-db-2026@db:5432/openbrain", "--port", "3001", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/", "--cors"]
+CMD ["python", "server.py"]
