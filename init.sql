@@ -83,3 +83,97 @@ BEGIN
 END;
 $$;
 
+-- Memories table (persistent agent memory)
+CREATE TABLE IF NOT EXISTS memories (
+    id SERIAL PRIMARY KEY,
+    memory_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    content TEXT NOT NULL,
+    project TEXT,
+    embedding vector(1536),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for memories
+CREATE INDEX IF NOT EXISTS memories_type_idx ON memories (memory_type);
+CREATE INDEX IF NOT EXISTS memories_project_idx ON memories (project);
+CREATE INDEX IF NOT EXISTS memories_embedding_idx ON memories
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- Semantic search function for memories
+CREATE OR REPLACE FUNCTION search_memories(
+    query_embedding vector(1536),
+    match_count INT DEFAULT 10,
+    filter_type TEXT DEFAULT NULL,
+    filter_project TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    id INT,
+    memory_type TEXT,
+    name TEXT,
+    description TEXT,
+    content TEXT,
+    project TEXT,
+    similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        m.id,
+        m.memory_type,
+        m.name,
+        m.description,
+        m.content,
+        m.project,
+        1 - (m.embedding <=> query_embedding) AS similarity
+    FROM memories m
+    WHERE (filter_type IS NULL OR m.memory_type = filter_type)
+      AND (filter_project IS NULL OR m.project = filter_project)
+      AND m.embedding IS NOT NULL
+    ORDER BY m.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+-- Semantic search function for shared resources
+CREATE OR REPLACE FUNCTION search_shared_resources(
+    query_embedding vector(1536),
+    match_count INT DEFAULT 10,
+    filter_type TEXT DEFAULT NULL,
+    filter_project TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    id INT,
+    resource_type TEXT,
+    name TEXT,
+    description TEXT,
+    url TEXT,
+    projects TEXT[],
+    metadata JSONB,
+    similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        r.id,
+        r.resource_type,
+        r.name,
+        r.description,
+        r.url,
+        r.projects,
+        r.metadata,
+        1 - (r.embedding <=> query_embedding) AS similarity
+    FROM shared_resources r
+    WHERE (filter_type IS NULL OR r.resource_type = filter_type)
+      AND (filter_project IS NULL OR filter_project = ANY(r.projects))
+      AND r.embedding IS NOT NULL
+    ORDER BY r.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;

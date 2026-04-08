@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openbrain": {
+      "type": "http",
+      "url": "https://brain.streckercm.com/mcp/"
+    }
+  }
+}
