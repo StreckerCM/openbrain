@@ -3,16 +3,16 @@ services:
     image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
-      POSTGRES_DB: openbrain
-      POSTGRES_USER: openbrain
-      POSTGRES_PASSWORD: openbrain-db-2026
+      POSTGRES_DB: ${POSTGRES_DB:-openbrain}
+      POSTGRES_USER: ${POSTGRES_USER:-openbrain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openbrain"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openbrain}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -21,10 +21,10 @@ services:
     image: postgrest/postgrest:latest
     restart: unless-stopped
     environment:
-      PGRST_DB_URI: postgresql://openbrain:openbrain-db-2026@db:5432/openbrain
+      PGRST_DB_URI: postgresql://${POSTGRES_USER:-openbrain}:${POSTGRES_PASSWORD:?err}@db:5432/${POSTGRES_DB:-openbrain}
       PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: openbrain
-      PGRST_JWT_SECRET: 89841f9e067dff74109955dea763fb3052054d9ce14715b40bd1c87a5fe4a013
+      PGRST_DB_ANON_ROLE: ${POSTGRES_USER:-openbrain}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:?Set PGRST_JWT_SECRET in .env}
       PGRST_SERVER_PORT: 3000
     ports:
       - "3006:3000"
@@ -55,9 +55,9 @@ services:
     environment:
       DB_HOST: db
       DB_PORT: "5432"
-      DB_NAME: openbrain
-      DB_USER: openbrain
-      DB_PASS: openbrain-db-2026
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      DB_USER: ${POSTGRES_USER:-openbrain}
+      DB_PASS: ${POSTGRES_PASSWORD:?err}
     volumes:
       - ./init.sql:/app/init.sql:ro
     ports:
@@ -77,9 +77,9 @@ services:
     environment:
       DB_HOST: db
       DB_PORT: "5432"
-      DB_NAME: openbrain
-      DB_USER: openbrain
-      DB_PASS: openbrain-db-2026
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      DB_USER: ${POSTGRES_USER:-openbrain}
+      DB_PASS: ${POSTGRES_PASSWORD:?err}
       POLL_INTERVAL: "30"
     depends_on:
       db:
