@@ -38,6 +38,8 @@ services:
   adminer:
     image: adminer:latest
     restart: unless-stopped
+    ports:
+      - "3008:8080"
     networks:
       - default
       - nginxproxymanager_default
@@ -48,6 +50,14 @@ services:
   mcp-gateway:
     build: ./mcp-gateway
     restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: openbrain
+      DB_PASS: openbrain-db-2026
     ports:
       - "3007:3001"
     networks:
