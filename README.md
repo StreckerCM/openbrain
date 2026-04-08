@@ -101,7 +101,7 @@ Add this to your Claude Code MCP config (`~/.claude/mcp.json` or project `.mcp.j
         "-y",
         "supergateway",
         "--streamableHttp",
-        "https://brain.streckercm.com/mcp/"
+        "https://brain.streckercm.com/mcp"
       ]
     }
   }
@@ -129,7 +129,7 @@ Then configure:
       "command": "supergateway",
       "args": [
         "--streamableHttp",
-        "https://brain.streckercm.com/mcp/"
+        "https://brain.streckercm.com/mcp"
       ]
     }
   }
