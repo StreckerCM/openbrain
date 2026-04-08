@@ -24,6 +24,32 @@ class AppContext:
     http: httpx.AsyncClient
 
 
+def _split_sql(sql: str) -> list[str]:
+    """Split SQL text into individual statements, respecting $$ blocks."""
+    statements: list[str] = []
+    current: list[str] = []
+    in_dollar = False
+    for line in sql.splitlines():
+        stripped = line.strip()
+        # Toggle $$ quoting (used in PL/pgSQL function bodies)
+        if "$$" in stripped:
+            count = stripped.count("$$")
+            if count % 2 == 1:
+                in_dollar = not in_dollar
+        current.append(line)
+        # Statement ends with ; outside a $$ block
+        if stripped.endswith(";") and not in_dollar:
+            stmt = "\n".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+    # Leftover (shouldn't happen with well-formed SQL)
+    remaining = "\n".join(current).strip().rstrip(";").strip()
+    if remaining:
+        statements.append(remaining)
+    return statements
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     pool = await asyncpg.create_pool(
@@ -34,8 +60,23 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     if os.path.exists(SCHEMA_FILE):
         with open(SCHEMA_FILE) as f:
             schema_sql = f.read()
-        async with pool.acquire() as conn:
-            await conn.execute(schema_sql)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(schema_sql)
+            print("[schema] init.sql applied successfully")
+        except Exception as e:
+            print(f"[schema] WARNING: init.sql failed: {e}")
+            print("[schema] Attempting statements individually...")
+            # Fall back to running each statement separately so partial
+            # failures (e.g. IVFFlat index on empty table) don't block
+            # the rest of the schema from being applied.
+            statements = _split_sql(schema_sql)
+            async with pool.acquire() as conn:
+                for stmt in statements:
+                    try:
+                        await conn.execute(stmt)
+                    except Exception as stmt_err:
+                        print(f"[schema] Skipped statement: {stmt_err}")
     async with httpx.AsyncClient() as http:
         try:
             yield AppContext(pool=pool, http=http)

@@ -1,6 +1,6 @@
 # OpenBrain — Agent Reference
 
-OpenBrain is a shared knowledge base for the Strecker development projects. It stores structured knowledge entries, project metadata, and shared resources, with vector embeddings for semantic search. Agents can read and write to it via two interfaces: the MCP gateway or the PostgREST API.
+OpenBrain is a shared knowledge base for the Strecker development projects. It stores structured knowledge entries, project metadata, shared resources, and persistent agent memories, with vector embeddings for semantic search. Agents can read and write to it via two interfaces: the MCP gateway or the PostgREST API.
 
 ---
 
@@ -16,7 +16,7 @@ Access is restricted to LAN (`192.168.1.0/24`), Tailscale (`100.72.222.0/24`, `1
 
 ## MCP Gateway
 
-The MCP gateway exposes the full PostgreSQL database as a Streamable HTTP MCP endpoint using `mcp-server-postgres`.
+The MCP gateway is a custom Python server built with [FastMCP](https://github.com/modelcontextprotocol/python-sdk). It exposes 12 domain-specific tools for managing knowledge, shared resources, projects, and memories — with built-in semantic search via OpenAI embeddings.
 
 **Endpoint:** `https://brain.streckercm.com/mcp/`
 > Trailing slash is required.
@@ -25,13 +25,16 @@ The MCP gateway exposes the full PostgreSQL database as a Streamable HTTP MCP en
 
 ### Connecting (Claude Code `mcp.json`)
 
+Use [supergateway](https://github.com/supercorp-ai/supergateway) to bridge stdio ↔ Streamable HTTP:
+
 ```json
 {
   "mcpServers": {
     "openbrain": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/path/to/supergateway/dist/index.js",
+        "-y",
+        "supergateway",
         "--streamableHttp",
         "https://brain.streckercm.com/mcp/"
       ]
@@ -40,17 +43,43 @@ The MCP gateway exposes the full PostgreSQL database as a Streamable HTTP MCP en
 }
 ```
 
+> **Note:** Do not use `"type": "http"` — Claude Code's native HTTP transport triggers OAuth discovery, which this server does not support. Use supergateway instead.
+
 ### Available MCP Tools
 
-The MCP server wraps PostgreSQL and exposes these tools:
+#### Knowledge (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `query` | Execute any SQL query (SELECT, INSERT, UPDATE, DELETE) |
-| `list_tables` | List all tables in the database |
-| `describe_table` | Get the schema for a specific table |
+| `add_knowledge` | Add a knowledge entry. Args: `project`, `title`, `content`, `category` (default: "general"), `tags` |
+| `search_knowledge` | Semantic or text search. Args: `query`, `project`, `category`, `limit` (default: 10) |
+| `list_knowledge` | Browse/filter entries. Args: `project`, `category`, `tags`, `limit` (default: 20) |
 
-The `query` tool is the primary interface. Use it for all reads and writes.
+#### Shared Resources (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `add_shared_resource` | Add a cross-project resource. Args: `resource_type`, `name`, `description`, `url`, `projects`, `metadata` |
+| `search_shared_resources` | Semantic or text search. Args: `query`, `resource_type`, `project`, `limit` (default: 10) |
+| `list_shared_resources` | Browse/filter resources. Args: `resource_type`, `project`, `limit` (default: 20) |
+
+#### Projects (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `add_project` | Register a project. Args: `name`, `description`, `repo_url`, `tech_stack`, `notes` |
+| `list_projects` | List all projects. Args: `tech` (optional tech filter) |
+| `get_project` | Get full project details. Args: `name` |
+
+#### Memories (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `save_memory` | Store a persistent memory. Args: `memory_type` (user/feedback/project/reference), `name`, `content`, `description`, `project` |
+| `recall_memory` | Semantic or text search. Args: `query`, `memory_type`, `project`, `limit` (default: 10) |
+| `list_memories` | Browse/filter memories. Args: `memory_type`, `project`, `limit` (default: 20) |
+
+All search tools use **semantic similarity** (cosine distance on OpenAI `text-embedding-3-small` embeddings) when the OPENAI_API_KEY is configured. If embeddings are unavailable, they fall back to text-based `ILIKE` search.
 
 ---
 
@@ -81,6 +110,12 @@ GET /pgapi/projects
 # Shared resources for a specific project
 GET /pgapi/shared_resources?projects=cs.{DownholePro}
 
+# Memories by type
+GET /pgapi/memories?memory_type=eq.feedback
+
+# Memories scoped to a project
+GET /pgapi/memories?project=eq.DownholePro
+
 # Select specific columns
 GET /pgapi/knowledge?project=eq.DownholePro&select=id,title,category,tags
 ```
@@ -98,6 +133,17 @@ Content-Type: application/json
   "title": "My Entry Title",
   "content": "Full content of the entry...",
   "tags": ["tag1", "tag2"]
+}
+
+# Insert a memory
+POST /pgapi/memories
+Content-Type: application/json
+
+{
+  "memory_type": "feedback",
+  "name": "Preferred test style",
+  "content": "Use integration tests, not mocks",
+  "project": "DownholePro"
 }
 
 # Update an entry
@@ -132,8 +178,6 @@ DELETE /pgapi/knowledge?id=eq.42
 | `created_at` | timestamptz | Auto-set on insert |
 | `updated_at` | timestamptz | Auto-set on insert |
 
-**Known project names:** `DownholePro`, `GeoMagSharp`, `XactSpot-MSA`
-
 ### `projects` — Project registry
 
 | Column | Type | Description |
@@ -154,7 +198,7 @@ Resources used by more than one project (standards, constants, algorithms, refer
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | integer | Auto-increment primary key |
-| `resource_type` | text | Category (e.g. `constants`, `algorithms`, `error-models`, `cross-references`, `library-status`, `geomagnetic-models`) |
+| `resource_type` | text | Category (e.g. `constants`, `algorithms`, `error-models`, `library`) |
 | `name` | text | Short name |
 | `description` | text | Full content/description |
 | `url` | text | Optional reference URL |
@@ -164,63 +208,70 @@ Resources used by more than one project (standards, constants, algorithms, refer
 | `created_at` | timestamptz | Auto-set on insert |
 | `updated_at` | timestamptz | Auto-set on insert |
 
+### `memories` — Persistent agent memory
+
+Stores information agents need to recall across sessions: user preferences, feedback, project context, and reference pointers.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | integer | Auto-increment primary key |
+| `memory_type` | text | One of: `user`, `feedback`, `project`, `reference` |
+| `name` | text | Short name for the memory |
+| `description` | text | One-line description (used for relevance matching) |
+| `content` | text | Full memory content |
+| `project` | text | Optional project scope (null = global) |
+| `embedding` | vector(1536) | Auto-generated semantic embedding |
+| `created_at` | timestamptz | Auto-set on insert |
+| `updated_at` | timestamptz | Auto-set on insert |
+
 ---
 
 ## Semantic Search
 
-The `search_knowledge` function performs cosine similarity search using pre-computed embeddings. Embeddings use OpenAI `text-embedding-ada-002` (1536 dimensions).
+All search tools (`search_knowledge`, `search_shared_resources`, `recall_memory`) use cosine similarity on pre-computed embeddings. Embeddings use OpenAI `text-embedding-3-small` (1536 dimensions).
 
-**Via MCP `query` tool:**
+When using the MCP tools, semantic search is automatic — just pass a natural language query. The server generates an embedding for your query and finds the most similar entries.
+
+**Fallback:** If the OpenAI API key is not configured or the API is unreachable, search tools fall back to text-based `ILIKE` matching.
+
+**Via PostgREST (SQL function):**
 
 ```sql
 SELECT * FROM search_knowledge(
     query_embedding := '<your_1536_dim_vector>',
     match_count := 10,
-    filter_project := 'DownholePro'   -- optional, NULL searches all projects
+    filter_project := 'DownholePro'
+);
+
+SELECT * FROM search_memories(
+    query_embedding := '<your_1536_dim_vector>',
+    match_count := 10,
+    filter_type := 'feedback',
+    filter_project := NULL
 );
 ```
 
-**Returns:** `id`, `project`, `category`, `title`, `content`, `tags`, `similarity` (0–1, higher = more similar)
-
-> In practice, most agents should use the MCP `query` tool with plain SQL `SELECT` statements filtered by `project`, `category`, or `tags` rather than vector search, unless semantic similarity across the full corpus is specifically needed.
-
----
-
-## Common SQL Patterns (via MCP `query` tool)
-
-```sql
--- List all entries for a project
-SELECT id, title, category, tags FROM knowledge WHERE project = 'DownholePro' ORDER BY category, title;
-
--- Full text search in content
-SELECT id, title, content FROM knowledge WHERE content ILIKE '%ISCWSA%';
-
--- Get all shared resources for a project
-SELECT name, resource_type, description FROM shared_resources WHERE 'DownholePro' = ANY(projects) OR projects = '{}';
-
--- Insert a new knowledge entry
-INSERT INTO knowledge (project, category, title, content, tags)
-VALUES ('DownholePro', 'algorithms', 'Title Here', 'Content here...', ARRAY['tag1','tag2']);
-
--- Update content and trigger re-embedding
-UPDATE knowledge SET content = 'New content...', updated_at = NOW() WHERE id = 42;
-```
+> In practice, use the MCP tools for search — they handle embedding generation automatically. The SQL functions are for direct database access.
 
 ---
 
 ## Embedder Service
 
-A background Python service polls the database every 30 seconds and generates embeddings for any `knowledge` or `shared_resources` rows where `embedding IS NULL`. Uses OpenAI `text-embedding-ada-002`. After inserting records, embeddings will be available within ~30 seconds.
+A background Python service polls the database every 30 seconds and generates embeddings for rows where `embedding IS NULL`. It processes all four tables:
+
+| Table | Text columns used for embedding |
+|-------|-------------------------------|
+| `knowledge` | title, content, category, project |
+| `shared_resources` | name, description, resource_type |
+| `memories` | name, description, content, memory_type |
+
+Uses OpenAI `text-embedding-3-small` (1536 dimensions). After inserting records via any method, embeddings will be available within ~30 seconds.
 
 ---
 
 ## Adminer (Database UI)
 
-A web-based database browser is available at:
-
-```
-https://brain.streckercm.com
-```
+A web-based database browser is available at the adminer port (3008 by default, or via reverse proxy).
 
 Login:
 - **System:** PostgreSQL
