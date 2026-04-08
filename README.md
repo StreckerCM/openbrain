@@ -36,11 +36,19 @@ git clone <your-repo-url>
 cd openbrain
 ```
 
-Create a `.env` file in the project root with your OpenAI API key:
+Copy the example environment file and fill in your values:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 OPENAI_API_KEY=sk-your-key-here
+POSTGRES_PASSWORD=change-me
+PGRST_JWT_SECRET=<output of: openssl rand -hex 32>
 ```
+
+`POSTGRES_DB` and `POSTGRES_USER` default to `openbrain` if not set.
 
 ### 2. Start the stack
 
