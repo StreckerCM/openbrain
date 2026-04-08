@@ -15,6 +15,7 @@ DB_USER = os.environ.get("DB_USER", "openbrain")
 DB_PASS = os.environ.get("DB_PASS", "openbrain-db-2026")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 EMBEDDING_MODEL = "text-embedding-3-small"
+SCHEMA_FILE = os.environ.get("SCHEMA_FILE", "/app/init.sql")
 
 
 @dataclass
@@ -29,6 +30,12 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         host=DB_HOST, port=DB_PORT, database=DB_NAME,
         user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
     )
+    # Run schema migrations on startup (all DDL is idempotent)
+    if os.path.exists(SCHEMA_FILE):
+        with open(SCHEMA_FILE) as f:
+            schema_sql = f.read()
+        async with pool.acquire() as conn:
+            await conn.execute(schema_sql)
     async with httpx.AsyncClient() as http:
         try:
             yield AppContext(pool=pool, http=http)

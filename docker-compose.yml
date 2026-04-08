@@ -58,6 +58,8 @@ services:
       DB_NAME: openbrain
       DB_USER: openbrain
       DB_PASS: openbrain-db-2026
+    volumes:
+      - ./init.sql:/app/init.sql:ro
     ports:
       - "3007:3001"
     networks:
