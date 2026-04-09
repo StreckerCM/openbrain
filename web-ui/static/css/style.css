@@ -40,8 +40,9 @@
   --shadow: 0 1px 3px rgba(0,0,0,0.4);
 }
 
-[data-theme="dark"] .badge { color: #ffffff; }
-[data-theme="dark"] .chip { background: var(--bg-card); }
+[data-theme="dark"] .badge,
+[data-theme="dark"] .badge-memories { color: #ffffff; }
+[data-theme="dark"] .chip { background: var(--bg-card); color: var(--text); }
 [data-theme="dark"] .chip.active { color: #ffffff; }
 
 body {
