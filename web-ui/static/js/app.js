@@ -41,8 +41,25 @@ const App = {
   currentFilter: "all",
 
   async init() {
+    // Restore saved theme
+    const saved = localStorage.getItem("ob-theme");
+    if (saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
+      document.documentElement.setAttribute("data-theme", "dark");
+    }
+
     window.addEventListener("hashchange", () => App.route());
     App.route();
+  },
+
+  toggleTheme() {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    if (isDark) {
+      document.documentElement.removeAttribute("data-theme");
+      localStorage.setItem("ob-theme", "light");
+    } else {
+      document.documentElement.setAttribute("data-theme", "dark");
+      localStorage.setItem("ob-theme", "dark");
+    }
   },
 
   async route() {
@@ -103,17 +120,22 @@ const App = {
     const resultsDiv = document.getElementById("searchResults");
     resultsDiv.innerHTML = `<div class="loading">Searching...</div>`;
 
-    const data = await API.search(query, exact, types);
-    const results = data.results || {};
+    try {
+      const data = await API.search(query, exact, types);
+      const results = data.results || {};
 
-    let html = "";
-    for (const type of ["knowledge", "shared_resources", "memories"]) {
-      if (results[type]) {
-        html += Components.resultGroup(type, results[type]);
+      let html = "";
+      for (const type of ["knowledge", "shared_resources", "memories"]) {
+        if (results[type]) {
+          html += Components.resultGroup(type, results[type]);
+        }
       }
-    }
 
-    resultsDiv.innerHTML = html || `<div class="empty-state">No results found.</div>`;
+      resultsDiv.innerHTML = html || `<div class="empty-state">No results found.</div>`;
+    } catch (err) {
+      console.error("Search failed:", err);
+      resultsDiv.innerHTML = `<div class="empty-state">Search failed. Check the browser console for details.</div>`;
+    }
   },
 
   setFilter(type) {
