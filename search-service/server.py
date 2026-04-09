@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 import asyncpg
 import httpx
@@ -19,7 +20,8 @@ pool: asyncpg.Pool | None = None
 http_client: httpx.AsyncClient | None = None
 
 
-async def startup():
+@asynccontextmanager
+async def lifespan(app):
     global pool, http_client
     pool = await asyncpg.create_pool(
         host=DB_HOST, port=DB_PORT, database=DB_NAME,
@@ -27,14 +29,13 @@ async def startup():
     )
     http_client = httpx.AsyncClient()
     print("[search-service] Started", flush=True)
-
-
-async def shutdown():
-    global pool, http_client
-    if http_client:
-        await http_client.aclose()
-    if pool:
-        await pool.close()
+    try:
+        yield
+    finally:
+        if http_client:
+            await http_client.aclose()
+        if pool:
+            await pool.close()
 
 
 async def get_embedding(text: str) -> list[float] | None:
@@ -194,6 +195,5 @@ app = Starlette(
         Route("/search", search, methods=["POST"]),
         Route("/health", health, methods=["GET"]),
     ],
-    on_startup=[startup],
-    on_shutdown=[shutdown],
+    lifespan=lifespan,
 )
