@@ -93,6 +93,34 @@ services:
     networks:
       - nginxproxymanager_default
 
+  search-service:
+    build: ./search-service
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      DB_USER: ${POSTGRES_USER:-openbrain}
+      DB_PASS: ${POSTGRES_PASSWORD:?err}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?err}
+    ports:
+      - "3009:3002"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web-ui:
+    build: ./web-ui
+    restart: unless-stopped
+    ports:
+      - "3010:80"
+    networks:
+      - default
+      - nginxproxymanager_default
+    depends_on:
+      - postgrest
+      - search-service
+
 networks:
   nginxproxymanager_default:
     external: true
