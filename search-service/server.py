@@ -1,4 +1,3 @@
-import json
 import os
 
 import asyncpg
@@ -50,7 +49,8 @@ async def get_embedding(text: str) -> list[float] | None:
         )
         resp.raise_for_status()
         return resp.json()["data"][0]["embedding"]
-    except Exception:
+    except Exception as e:
+        print(f"[search-service] embedding failed: {e}", flush=True)
         return None
 
 
@@ -94,33 +94,32 @@ async def _search_semantic(table: str, embedding_str: str, limit: int) -> list[d
 
 
 async def _search_exact(table: str, query: str, limit: int) -> list[dict]:
-    pattern = f"%{query}%"
     if table == "knowledge":
         rows = await pool.fetch(
             """SELECT id, project, category, title, content, tags, updated_at
                FROM knowledge
-               WHERE title ILIKE $1 OR content ILIKE $1
+               WHERE title ILIKE '%' || $1 || '%' OR content ILIKE '%' || $1 || '%'
                ORDER BY updated_at DESC
                LIMIT $2""",
-            pattern, limit,
+            query, limit,
         )
     elif table == "shared_resources":
         rows = await pool.fetch(
             """SELECT id, resource_type, name, description, url, projects, metadata, updated_at
                FROM shared_resources
-               WHERE name ILIKE $1 OR description ILIKE $1
+               WHERE name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%'
                ORDER BY updated_at DESC
                LIMIT $2""",
-            pattern, limit,
+            query, limit,
         )
     elif table == "memories":
         rows = await pool.fetch(
             """SELECT id, memory_type, name, description, content, project, updated_at
                FROM memories
-               WHERE name ILIKE $1 OR content ILIKE $1 OR description ILIKE $1
+               WHERE name ILIKE '%' || $1 || '%' OR content ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%'
                ORDER BY updated_at DESC
                LIMIT $2""",
-            pattern, limit,
+            query, limit,
         )
     else:
         return []
@@ -144,6 +143,8 @@ def _serialize_rows(rows: list[dict]) -> list[dict]:
 
 
 async def search(request: Request) -> JSONResponse:
+    if pool is None:
+        return JSONResponse({"error": "Service not ready"}, status_code=503)
     try:
         body = await request.json()
     except Exception:
