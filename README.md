@@ -56,7 +56,7 @@ PGRST_JWT_SECRET=<output of: openssl rand -hex 32>
 docker compose up -d --build
 ```
 
-This launches six services:
+This launches eight services:
 
 | Service | Port | Description |
 |---------|------|-------------|
@@ -66,6 +66,8 @@ This launches six services:
 | **embedder** | — | Background service that generates vector embeddings every 30s |
 | **adminer** | 3008 | Web-based database browser |
 | **docs** | — | Nginx serving the docs directory |
+| **search-service** | 3009 | Semantic search API for the web UI |
+| **web-ui** | 3010 | Browser-based knowledge base UI |
 
 > **Note:** The compose file references an external `nginxproxymanager_default` network for reverse proxy integration. If you're not using Nginx Proxy Manager, remove the `networks: nginxproxymanager_default` references from `docker-compose.yml` and access services directly on their mapped ports.
 
@@ -167,6 +169,18 @@ After configuring, restart Claude Code and check that the MCP tools are availabl
 ```
 
 You should see 12 tools across four domains: knowledge, shared resources, projects, and memories.
+
+## Web UI
+
+The web UI provides browser-based access to the knowledge base at `http://localhost:3010` (or via your reverse proxy).
+
+### Features
+
+- **Unified search** across knowledge, shared resources, and memories with semantic (vector) or exact text matching
+- **Project browsing** with drill-down views showing all entries scoped to a project
+- **Type filtering** to narrow search results by category
+
+The web UI is read-only — agents handle writes via the MCP gateway.
 
 ## Available MCP Tools
 
