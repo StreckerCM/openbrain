@@ -118,7 +118,7 @@ AS $$
 BEGIN
     IF filter_project IS NOT NULL THEN
         RETURN QUERY
-        SELECT
+        SELECT DISTINCT
             k.id, k.project, k.category, k.title, k.content, k.url, k.tags, k.status,
             1 - (k.embedding <=> query_embedding) AS similarity
         FROM knowledge k
@@ -165,7 +165,7 @@ AS $$
 BEGIN
     IF filter_project IS NOT NULL THEN
         RETURN QUERY
-        SELECT
+        SELECT DISTINCT
             m.id, m.memory_type, m.name, m.description, m.content, m.project, m.status,
             1 - (m.embedding <=> query_embedding) AS similarity
         FROM memories m

@@ -237,7 +237,7 @@ async def search_knowledge(
                    JOIN projects p ON p.id = pl.project_id AND p.name = $1
                    WHERE ($2::text IS NULL OR k.status = $2)
                      AND ($3::text IS NULL OR k.category = $3)
-                     AND (k.title ILIKE '%%' || $4 || '%%' OR k.content ILIKE '%%' || $4 || '%%')
+                     AND (k.title ILIKE '%' || $4 || '%' OR k.content ILIKE '%' || $4 || '%')
                    ORDER BY k.updated_at DESC
                    LIMIT $5""",
                 project, status_filter, category, query, limit,
@@ -249,7 +249,7 @@ async def search_knowledge(
                    FROM knowledge k
                    WHERE ($1::text IS NULL OR k.status = $1)
                      AND ($2::text IS NULL OR k.category = $2)
-                     AND (k.title ILIKE '%%' || $3 || '%%' OR k.content ILIKE '%%' || $3 || '%%')
+                     AND (k.title ILIKE '%' || $3 || '%' OR k.content ILIKE '%' || $3 || '%')
                    ORDER BY k.updated_at DESC
                    LIMIT $4""",
                 status_filter, category, query, limit,
@@ -565,7 +565,7 @@ async def recall_memory(
                    JOIN projects p ON p.id = pl.project_id AND p.name = $1
                    WHERE ($2::text IS NULL OR m.memory_type = $2)
                      AND ($3::text IS NULL OR m.status = $3)
-                     AND (m.name ILIKE '%%' || $4 || '%%' OR m.content ILIKE '%%' || $4 || '%%')
+                     AND (m.name ILIKE '%' || $4 || '%' OR m.content ILIKE '%' || $4 || '%')
                    ORDER BY m.updated_at DESC
                    LIMIT $5""",
                 project, memory_type, status_filter, query, limit,
@@ -577,7 +577,7 @@ async def recall_memory(
                    FROM memories m
                    WHERE ($1::text IS NULL OR m.memory_type = $1)
                      AND ($2::text IS NULL OR m.status = $2)
-                     AND (m.name ILIKE '%%' || $3 || '%%' OR m.content ILIKE '%%' || $3 || '%%')
+                     AND (m.name ILIKE '%' || $3 || '%' OR m.content ILIKE '%' || $3 || '%')
                    ORDER BY m.updated_at DESC
                    LIMIT $4""",
                 memory_type, status_filter, query, limit,
