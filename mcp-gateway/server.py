@@ -881,6 +881,115 @@ async def unarchive_project(
     return _format_rows([row])
 
 
+# --- Link management tools ---
+
+
+@mcp.tool()
+async def link_to_project(
+    project: str,
+    knowledge_id: int | None = None,
+    memory_id: int | None = None,
+    ctx: Context = None,
+) -> str:
+    """Associate a knowledge entry or memory with a project.
+
+    Args:
+        project: Project name to link to
+        knowledge_id: Knowledge entry ID (provide exactly one of knowledge_id or memory_id)
+        memory_id: Memory ID (provide exactly one of knowledge_id or memory_id)
+    """
+    if (knowledge_id is None) == (memory_id is None):
+        return json.dumps({"error": "Provide exactly one of knowledge_id or memory_id"})
+
+    app = _get_app_ctx(ctx)
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            proj = await conn.fetchrow(
+                "SELECT id FROM projects WHERE name = $1 AND status IN ('active', 'system')",
+                project,
+            )
+            if proj is None:
+                return json.dumps({"error": f"Project '{project}' not found or not active"})
+
+            if knowledge_id is not None:
+                exists = await conn.fetchval(
+                    "SELECT id FROM knowledge WHERE id = $1 AND status = 'active'",
+                    knowledge_id,
+                )
+                if exists is None:
+                    return json.dumps({"error": f"Knowledge entry {knowledge_id} not found or not active"})
+                row = await conn.fetchrow(
+                    """INSERT INTO project_links (project_id, knowledge_id, status)
+                       VALUES ($1, $2, 'active')
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, project_id, knowledge_id, status""",
+                    proj["id"], knowledge_id,
+                )
+            else:
+                exists = await conn.fetchval(
+                    "SELECT id FROM memories WHERE id = $1 AND status = 'active'",
+                    memory_id,
+                )
+                if exists is None:
+                    return json.dumps({"error": f"Memory {memory_id} not found or not active"})
+                row = await conn.fetchrow(
+                    """INSERT INTO project_links (project_id, memory_id, status)
+                       VALUES ($1, $2, 'active')
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, project_id, memory_id, status""",
+                    proj["id"], memory_id,
+                )
+
+    if row is None:
+        return json.dumps({"message": "Link already exists"})
+    return _format_rows([row])
+
+
+@mcp.tool()
+async def unlink_from_project(
+    project: str,
+    knowledge_id: int | None = None,
+    memory_id: int | None = None,
+    ctx: Context = None,
+) -> str:
+    """Remove the association between a knowledge entry or memory and a project.
+    Archives the link — does not delete the entity itself.
+
+    Args:
+        project: Project name to unlink from
+        knowledge_id: Knowledge entry ID (provide exactly one of knowledge_id or memory_id)
+        memory_id: Memory ID (provide exactly one of knowledge_id or memory_id)
+    """
+    if (knowledge_id is None) == (memory_id is None):
+        return json.dumps({"error": "Provide exactly one of knowledge_id or memory_id"})
+
+    app = _get_app_ctx(ctx)
+    proj = await app.pool.fetchrow(
+        "SELECT id FROM projects WHERE name = $1", project
+    )
+    if proj is None:
+        return json.dumps({"error": f"Project '{project}' not found"})
+
+    if knowledge_id is not None:
+        row = await app.pool.fetchrow(
+            """UPDATE project_links SET status = 'archived', archived_at = NOW()
+               WHERE project_id = $1 AND knowledge_id = $2 AND status = 'active'
+               RETURNING id, project_id, knowledge_id, status""",
+            proj["id"], knowledge_id,
+        )
+    else:
+        row = await app.pool.fetchrow(
+            """UPDATE project_links SET status = 'archived', archived_at = NOW()
+               WHERE project_id = $1 AND memory_id = $2 AND status = 'active'
+               RETURNING id, project_id, memory_id, status""",
+            proj["id"], memory_id,
+        )
+
+    if row is None:
+        return json.dumps({"error": "Active link not found"})
+    return _format_rows([row])
+
+
 if __name__ == "__main__":
     import asyncio
     print("[startup] Applying database schema...", flush=True)
