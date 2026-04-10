@@ -16,6 +16,7 @@ DB_PASS = os.environ.get("DB_PASS", "openbrain-db-2026")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 EMBEDDING_MODEL = "text-embedding-3-small"
 SCHEMA_FILE = os.environ.get("SCHEMA_FILE", "/app/init.sql")
+ORPHAN_POLICY = os.environ.get("ORPHAN_POLICY", "archive")
 
 
 @dataclass
@@ -129,29 +130,48 @@ def _format_rows(rows: list[asyncpg.Record]) -> str:
 
 @mcp.tool()
 async def add_knowledge(
-    project: str,
     title: str,
     content: str,
+    project: str = "general",
     category: str = "general",
     tags: list[str] | None = None,
+    url: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Add a knowledge entry to the OpenBrain knowledge base.
 
     Args:
-        project: Project name (e.g. "DownholePro")
         title: Entry title
         content: Entry content
+        project: Project name for provenance and initial link (default: "general")
         category: Category (default: "general")
         tags: Optional tags for filtering
+        url: Optional URL (e.g. repo link, docs page)
     """
     app = _get_app_ctx(ctx)
-    row = await app.pool.fetchrow(
-        """INSERT INTO knowledge (project, category, title, content, tags)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, project, category, title, created_at""",
-        project, category, title, content, tags or [],
-    )
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """INSERT INTO knowledge (project, category, title, content, url, tags)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   RETURNING id, project, category, title, url, created_at""",
+                project, category, title, content, url, tags or [],
+            )
+            proj = await conn.fetchrow(
+                "SELECT id FROM projects WHERE name = $1", project
+            )
+            if proj is None:
+                proj = await conn.fetchrow(
+                    """INSERT INTO projects (name, status)
+                       VALUES ($1, 'active') RETURNING id""",
+                    project,
+                )
+            await conn.execute(
+                """INSERT INTO project_links (project_id, knowledge_id, status)
+                   VALUES ($1, $2, 'active')
+                   ON CONFLICT DO NOTHING""",
+                proj["id"], row["id"],
+            )
     return _format_rows([row])
 
 
@@ -160,6 +180,7 @@ async def search_knowledge(
     query: str,
     project: str | None = None,
     category: str | None = None,
+    include_archived: bool = False,
     limit: int = 10,
     ctx: Context = None,
 ) -> str:
@@ -167,37 +188,72 @@ async def search_knowledge(
 
     Args:
         query: Search query text
-        project: Filter to a specific project
+        project: Filter to knowledge linked to a specific project (via project_links)
         category: Filter to a specific category
+        include_archived: Include archived entries (default: false)
         limit: Max results (default: 10)
     """
     app = _get_app_ctx(ctx)
+    status_filter = None if include_archived else "active"
     embedding = await get_embedding(app.http, query)
 
     if embedding is not None:
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-        rows = await app.pool.fetch(
-            """SELECT id, project, category, title, content, tags,
-                      1 - (embedding <=> $1::vector) AS similarity
-               FROM knowledge
-               WHERE ($2::text IS NULL OR project = $2)
-                 AND ($3::text IS NULL OR category = $3)
-                 AND embedding IS NOT NULL
-               ORDER BY embedding <=> $1::vector
-               LIMIT $4""",
-            embedding_str, project, category, limit,
-        )
+        if project is not None:
+            rows = await app.pool.fetch(
+                """SELECT DISTINCT k.id, k.project, k.category, k.title, k.content,
+                          k.url, k.tags, k.status,
+                          1 - (k.embedding <=> $1::vector) AS similarity
+                   FROM knowledge k
+                   JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
+                   JOIN projects p ON p.id = pl.project_id AND p.name = $2
+                   WHERE ($3::text IS NULL OR k.status = $3)
+                     AND ($4::text IS NULL OR k.category = $4)
+                     AND k.embedding IS NOT NULL
+                   ORDER BY k.embedding <=> $1::vector
+                   LIMIT $5""",
+                embedding_str, project, status_filter, category, limit,
+            )
+        else:
+            rows = await app.pool.fetch(
+                """SELECT k.id, k.project, k.category, k.title, k.content,
+                          k.url, k.tags, k.status,
+                          1 - (k.embedding <=> $1::vector) AS similarity
+                   FROM knowledge k
+                   WHERE ($2::text IS NULL OR k.status = $2)
+                     AND ($3::text IS NULL OR k.category = $3)
+                     AND k.embedding IS NOT NULL
+                   ORDER BY k.embedding <=> $1::vector
+                   LIMIT $4""",
+                embedding_str, status_filter, category, limit,
+            )
     else:
-        rows = await app.pool.fetch(
-            """SELECT id, project, category, title, content, tags
-               FROM knowledge
-               WHERE ($1::text IS NULL OR project = $1)
-                 AND ($2::text IS NULL OR category = $2)
-                 AND (title ILIKE '%' || $3 || '%' OR content ILIKE '%' || $3 || '%')
-               ORDER BY updated_at DESC
-               LIMIT $4""",
-            project, category, query, limit,
-        )
+        if project is not None:
+            rows = await app.pool.fetch(
+                """SELECT DISTINCT k.id, k.project, k.category, k.title, k.content,
+                          k.url, k.tags, k.status
+                   FROM knowledge k
+                   JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
+                   JOIN projects p ON p.id = pl.project_id AND p.name = $1
+                   WHERE ($2::text IS NULL OR k.status = $2)
+                     AND ($3::text IS NULL OR k.category = $3)
+                     AND (k.title ILIKE '%%' || $4 || '%%' OR k.content ILIKE '%%' || $4 || '%%')
+                   ORDER BY k.updated_at DESC
+                   LIMIT $5""",
+                project, status_filter, category, query, limit,
+            )
+        else:
+            rows = await app.pool.fetch(
+                """SELECT k.id, k.project, k.category, k.title, k.content,
+                          k.url, k.tags, k.status
+                   FROM knowledge k
+                   WHERE ($1::text IS NULL OR k.status = $1)
+                     AND ($2::text IS NULL OR k.category = $2)
+                     AND (k.title ILIKE '%%' || $3 || '%%' OR k.content ILIKE '%%' || $3 || '%%')
+                   ORDER BY k.updated_at DESC
+                   LIMIT $4""",
+                status_filter, category, query, limit,
+            )
     return _format_rows(rows)
 
 
@@ -206,135 +262,48 @@ async def list_knowledge(
     project: str | None = None,
     category: str | None = None,
     tags: list[str] | None = None,
+    include_archived: bool = False,
     limit: int = 20,
     ctx: Context = None,
 ) -> str:
     """Browse and filter knowledge entries.
 
     Args:
-        project: Filter by project
+        project: Filter to knowledge linked to a specific project
         category: Filter by category
         tags: Filter by any matching tag
+        include_archived: Include archived entries (default: false)
         limit: Max results (default: 20)
     """
     app = _get_app_ctx(ctx)
-    rows = await app.pool.fetch(
-        """SELECT id, project, category, title, content, tags, updated_at
-           FROM knowledge
-           WHERE ($1::text IS NULL OR project = $1)
-             AND ($2::text IS NULL OR category = $2)
-             AND ($3::text[] IS NULL OR tags && $3)
-           ORDER BY updated_at DESC
-           LIMIT $4""",
-        project, category, tags, limit,
-    )
-    return _format_rows(rows)
+    status_filter = None if include_archived else "active"
 
-
-# --- Shared resources tools ---
-
-
-@mcp.tool()
-async def add_shared_resource(
-    resource_type: str,
-    name: str,
-    description: str | None = None,
-    url: str | None = None,
-    projects: list[str] | None = None,
-    metadata: dict | None = None,
-    ctx: Context = None,
-) -> str:
-    """Add a shared resource to the knowledge base.
-
-    Args:
-        resource_type: Type (e.g. "library", "service", "tool")
-        name: Resource name
-        description: Resource description
-        url: Resource URL
-        projects: Associated project names
-        metadata: Arbitrary JSON metadata
-    """
-    app = _get_app_ctx(ctx)
-    meta_json = json.dumps(metadata) if metadata else "{}"
-    row = await app.pool.fetchrow(
-        """INSERT INTO shared_resources (resource_type, name, description, url, projects, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-           RETURNING id, resource_type, name, created_at""",
-        resource_type, name, description, url, projects or [], meta_json,
-    )
-    return _format_rows([row])
-
-
-@mcp.tool()
-async def search_shared_resources(
-    query: str,
-    resource_type: str | None = None,
-    project: str | None = None,
-    limit: int = 10,
-    ctx: Context = None,
-) -> str:
-    """Search shared resources using semantic similarity or text matching.
-
-    Args:
-        query: Search query text
-        resource_type: Filter by type
-        project: Filter to resources associated with a project
-        limit: Max results (default: 10)
-    """
-    app = _get_app_ctx(ctx)
-    embedding = await get_embedding(app.http, query)
-
-    if embedding is not None:
-        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+    if project is not None:
         rows = await app.pool.fetch(
-            """SELECT id, resource_type, name, description, url, projects, metadata,
-                      1 - (embedding <=> $1::vector) AS similarity
-               FROM shared_resources
-               WHERE ($2::text IS NULL OR resource_type = $2)
-                 AND ($3::text IS NULL OR $3 = ANY(projects))
-                 AND embedding IS NOT NULL
-               ORDER BY embedding <=> $1::vector
-               LIMIT $4""",
-            embedding_str, resource_type, project, limit,
+            """SELECT DISTINCT k.id, k.project, k.category, k.title, k.content,
+                      k.url, k.tags, k.status, k.updated_at
+               FROM knowledge k
+               JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
+               JOIN projects p ON p.id = pl.project_id AND p.name = $1
+               WHERE ($2::text IS NULL OR k.status = $2)
+                 AND ($3::text IS NULL OR k.category = $3)
+                 AND ($4::text[] IS NULL OR k.tags && $4)
+               ORDER BY k.updated_at DESC
+               LIMIT $5""",
+            project, status_filter, category, tags, limit,
         )
     else:
         rows = await app.pool.fetch(
-            """SELECT id, resource_type, name, description, url, projects, metadata
-               FROM shared_resources
-               WHERE ($1::text IS NULL OR resource_type = $1)
-                 AND ($2::text IS NULL OR $2 = ANY(projects))
-                 AND (name ILIKE '%' || $3 || '%' OR description ILIKE '%' || $3 || '%')
-               ORDER BY updated_at DESC
+            """SELECT k.id, k.project, k.category, k.title, k.content,
+                      k.url, k.tags, k.status, k.updated_at
+               FROM knowledge k
+               WHERE ($1::text IS NULL OR k.status = $1)
+                 AND ($2::text IS NULL OR k.category = $2)
+                 AND ($3::text[] IS NULL OR k.tags && $3)
+               ORDER BY k.updated_at DESC
                LIMIT $4""",
-            resource_type, project, query, limit,
+            status_filter, category, tags, limit,
         )
-    return _format_rows(rows)
-
-
-@mcp.tool()
-async def list_shared_resources(
-    resource_type: str | None = None,
-    project: str | None = None,
-    limit: int = 20,
-    ctx: Context = None,
-) -> str:
-    """Browse and filter shared resources.
-
-    Args:
-        resource_type: Filter by type
-        project: Filter to resources associated with a project
-        limit: Max results (default: 20)
-    """
-    app = _get_app_ctx(ctx)
-    rows = await app.pool.fetch(
-        """SELECT id, resource_type, name, description, url, projects, metadata, updated_at
-           FROM shared_resources
-           WHERE ($1::text IS NULL OR resource_type = $1)
-             AND ($2::text IS NULL OR $2 = ANY(projects))
-           ORDER BY updated_at DESC
-           LIMIT $3""",
-        resource_type, project, limit,
-    )
     return _format_rows(rows)
 
 
@@ -348,6 +317,7 @@ async def add_project(
     repo_url: str | None = None,
     tech_stack: list[str] | None = None,
     notes: str | None = None,
+    orphan_policy: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Register a new project in the knowledge base.
@@ -358,13 +328,16 @@ async def add_project(
         repo_url: Repository URL
         tech_stack: Technologies used
         notes: Additional notes
+        orphan_policy: Orphan handling when project is archived: "archive" or "reassign" (default: uses global ORPHAN_POLICY env var)
     """
+    if orphan_policy is not None and orphan_policy not in ("archive", "reassign"):
+        return json.dumps({"error": "orphan_policy must be 'archive' or 'reassign'"})
     app = _get_app_ctx(ctx)
     row = await app.pool.fetchrow(
-        """INSERT INTO projects (name, description, repo_url, tech_stack, notes)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, name, created_at""",
-        name, description, repo_url, tech_stack or [], notes,
+        """INSERT INTO projects (name, description, repo_url, tech_stack, notes, orphan_policy)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, name, status, orphan_policy, created_at""",
+        name, description, repo_url, tech_stack or [], notes, orphan_policy,
     )
     return _format_rows([row])
 
@@ -372,21 +345,33 @@ async def add_project(
 @mcp.tool()
 async def list_projects(
     tech: str | None = None,
+    include_archived: bool = False,
     ctx: Context = None,
 ) -> str:
     """List all registered projects.
 
     Args:
         tech: Filter to projects using a specific technology
+        include_archived: Include archived projects (default: false)
     """
     app = _get_app_ctx(ctx)
-    rows = await app.pool.fetch(
-        """SELECT id, name, description, tech_stack
-           FROM projects
-           WHERE ($1::text IS NULL OR $1 = ANY(tech_stack))
-           ORDER BY name""",
-        tech,
-    )
+    if include_archived:
+        rows = await app.pool.fetch(
+            """SELECT id, name, description, tech_stack, status, orphan_policy
+               FROM projects
+               WHERE ($1::text IS NULL OR $1 = ANY(tech_stack))
+               ORDER BY name""",
+            tech,
+        )
+    else:
+        rows = await app.pool.fetch(
+            """SELECT id, name, description, tech_stack, status, orphan_policy
+               FROM projects
+               WHERE status IN ('active', 'system')
+                 AND ($1::text IS NULL OR $1 = ANY(tech_stack))
+               ORDER BY name""",
+            tech,
+        )
     return _format_rows(rows)
 
 
@@ -402,7 +387,8 @@ async def get_project(
     """
     app = _get_app_ctx(ctx)
     row = await app.pool.fetchrow(
-        """SELECT id, name, description, repo_url, tech_stack, notes, created_at, updated_at
+        """SELECT id, name, description, repo_url, tech_stack, notes,
+                  status, orphan_policy, created_at, updated_at
            FROM projects
            WHERE name = $1""",
         name,
@@ -424,7 +410,7 @@ async def save_memory(
     name: str,
     content: str,
     description: str | None = None,
-    project: str | None = None,
+    project: str = "general",
     ctx: Context = None,
 ) -> str:
     """Store a persistent memory for future recall.
@@ -434,17 +420,34 @@ async def save_memory(
         name: Short name for the memory
         content: Memory content
         description: One-line description for relevance matching
-        project: Project scope (omit for global)
+        project: Project name for provenance and initial link (default: "general")
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return json.dumps({"error": f"memory_type must be one of: {', '.join(sorted(VALID_MEMORY_TYPES))}"})
     app = _get_app_ctx(ctx)
-    row = await app.pool.fetchrow(
-        """INSERT INTO memories (memory_type, name, content, description, project)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, memory_type, name, created_at""",
-        memory_type, name, content, description, project,
-    )
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """INSERT INTO memories (memory_type, name, content, description, project)
+                   VALUES ($1, $2, $3, $4, $5)
+                   RETURNING id, memory_type, name, created_at""",
+                memory_type, name, content, description, project,
+            )
+            proj = await conn.fetchrow(
+                "SELECT id FROM projects WHERE name = $1", project
+            )
+            if proj is None:
+                proj = await conn.fetchrow(
+                    """INSERT INTO projects (name, status)
+                       VALUES ($1, 'active') RETURNING id""",
+                    project,
+                )
+            await conn.execute(
+                """INSERT INTO project_links (project_id, memory_id, status)
+                   VALUES ($1, $2, 'active')
+                   ON CONFLICT DO NOTHING""",
+                proj["id"], row["id"],
+            )
     return _format_rows([row])
 
 
@@ -453,6 +456,7 @@ async def recall_memory(
     query: str,
     memory_type: str | None = None,
     project: str | None = None,
+    include_archived: bool = False,
     limit: int = 10,
     ctx: Context = None,
 ) -> str:
@@ -461,36 +465,71 @@ async def recall_memory(
     Args:
         query: What to search for
         memory_type: Filter by type (user, feedback, project, reference)
-        project: Filter by project scope
+        project: Filter to memories linked to a specific project
+        include_archived: Include archived memories (default: false)
         limit: Max results (default: 10)
     """
     app = _get_app_ctx(ctx)
+    status_filter = None if include_archived else "active"
     embedding = await get_embedding(app.http, query)
 
     if embedding is not None:
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-        rows = await app.pool.fetch(
-            """SELECT id, memory_type, name, description, content, project,
-                      1 - (embedding <=> $1::vector) AS similarity
-               FROM memories
-               WHERE ($2::text IS NULL OR memory_type = $2)
-                 AND ($3::text IS NULL OR project = $3)
-                 AND embedding IS NOT NULL
-               ORDER BY embedding <=> $1::vector
-               LIMIT $4""",
-            embedding_str, memory_type, project, limit,
-        )
+        if project is not None:
+            rows = await app.pool.fetch(
+                """SELECT DISTINCT m.id, m.memory_type, m.name, m.description,
+                          m.content, m.project, m.status,
+                          1 - (m.embedding <=> $1::vector) AS similarity
+                   FROM memories m
+                   JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
+                   JOIN projects p ON p.id = pl.project_id AND p.name = $2
+                   WHERE ($3::text IS NULL OR m.memory_type = $3)
+                     AND ($4::text IS NULL OR m.status = $4)
+                     AND m.embedding IS NOT NULL
+                   ORDER BY m.embedding <=> $1::vector
+                   LIMIT $5""",
+                embedding_str, project, memory_type, status_filter, limit,
+            )
+        else:
+            rows = await app.pool.fetch(
+                """SELECT m.id, m.memory_type, m.name, m.description,
+                          m.content, m.project, m.status,
+                          1 - (m.embedding <=> $1::vector) AS similarity
+                   FROM memories m
+                   WHERE ($2::text IS NULL OR m.memory_type = $2)
+                     AND ($3::text IS NULL OR m.status = $3)
+                     AND m.embedding IS NOT NULL
+                   ORDER BY m.embedding <=> $1::vector
+                   LIMIT $4""",
+                embedding_str, memory_type, status_filter, limit,
+            )
     else:
-        rows = await app.pool.fetch(
-            """SELECT id, memory_type, name, description, content, project
-               FROM memories
-               WHERE ($1::text IS NULL OR memory_type = $1)
-                 AND ($2::text IS NULL OR project = $2)
-                 AND (name ILIKE '%' || $3 || '%' OR content ILIKE '%' || $3 || '%')
-               ORDER BY updated_at DESC
-               LIMIT $4""",
-            memory_type, project, query, limit,
-        )
+        if project is not None:
+            rows = await app.pool.fetch(
+                """SELECT DISTINCT m.id, m.memory_type, m.name, m.description,
+                          m.content, m.project, m.status
+                   FROM memories m
+                   JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
+                   JOIN projects p ON p.id = pl.project_id AND p.name = $1
+                   WHERE ($2::text IS NULL OR m.memory_type = $2)
+                     AND ($3::text IS NULL OR m.status = $3)
+                     AND (m.name ILIKE '%%' || $4 || '%%' OR m.content ILIKE '%%' || $4 || '%%')
+                   ORDER BY m.updated_at DESC
+                   LIMIT $5""",
+                project, memory_type, status_filter, query, limit,
+            )
+        else:
+            rows = await app.pool.fetch(
+                """SELECT m.id, m.memory_type, m.name, m.description,
+                          m.content, m.project, m.status
+                   FROM memories m
+                   WHERE ($1::text IS NULL OR m.memory_type = $1)
+                     AND ($2::text IS NULL OR m.status = $2)
+                     AND (m.name ILIKE '%%' || $3 || '%%' OR m.content ILIKE '%%' || $3 || '%%')
+                   ORDER BY m.updated_at DESC
+                   LIMIT $4""",
+                memory_type, status_filter, query, limit,
+            )
     return _format_rows(rows)
 
 
@@ -498,6 +537,7 @@ async def recall_memory(
 async def list_memories(
     memory_type: str | None = None,
     project: str | None = None,
+    include_archived: bool = False,
     limit: int = 20,
     ctx: Context = None,
 ) -> str:
@@ -505,19 +545,37 @@ async def list_memories(
 
     Args:
         memory_type: Filter by type (user, feedback, project, reference)
-        project: Filter by project scope
+        project: Filter to memories linked to a specific project
+        include_archived: Include archived memories (default: false)
         limit: Max results (default: 20)
     """
     app = _get_app_ctx(ctx)
-    rows = await app.pool.fetch(
-        """SELECT id, memory_type, name, description, content, project, updated_at
-           FROM memories
-           WHERE ($1::text IS NULL OR memory_type = $1)
-             AND ($2::text IS NULL OR project = $2)
-           ORDER BY updated_at DESC
-           LIMIT $3""",
-        memory_type, project, limit,
-    )
+    status_filter = None if include_archived else "active"
+
+    if project is not None:
+        rows = await app.pool.fetch(
+            """SELECT DISTINCT m.id, m.memory_type, m.name, m.description,
+                      m.content, m.project, m.status, m.updated_at
+               FROM memories m
+               JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
+               JOIN projects p ON p.id = pl.project_id AND p.name = $1
+               WHERE ($2::text IS NULL OR m.memory_type = $2)
+                 AND ($3::text IS NULL OR m.status = $3)
+               ORDER BY m.updated_at DESC
+               LIMIT $4""",
+            project, memory_type, status_filter, limit,
+        )
+    else:
+        rows = await app.pool.fetch(
+            """SELECT m.id, m.memory_type, m.name, m.description,
+                      m.content, m.project, m.status, m.updated_at
+               FROM memories m
+               WHERE ($1::text IS NULL OR m.memory_type = $1)
+                 AND ($2::text IS NULL OR m.status = $2)
+               ORDER BY m.updated_at DESC
+               LIMIT $3""",
+            memory_type, status_filter, limit,
+        )
     return _format_rows(rows)
 
 
