@@ -126,7 +126,7 @@ BEGIN
         JOIN projects p ON p.id = pl.project_id AND p.name = filter_project
         WHERE k.status = filter_status
           AND k.embedding IS NOT NULL
-        ORDER BY k.embedding <=> query_embedding
+        ORDER BY similarity DESC
         LIMIT match_count;
     ELSE
         RETURN QUERY
@@ -174,7 +174,7 @@ BEGIN
         WHERE (filter_type IS NULL OR m.memory_type = filter_type)
           AND m.status = filter_status
           AND m.embedding IS NOT NULL
-        ORDER BY m.embedding <=> query_embedding
+        ORDER BY similarity DESC
         LIMIT match_count;
     ELSE
         RETURN QUERY

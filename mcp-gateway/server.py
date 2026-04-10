@@ -210,7 +210,7 @@ async def search_knowledge(
                    WHERE ($3::text IS NULL OR k.status = $3)
                      AND ($4::text IS NULL OR k.category = $4)
                      AND k.embedding IS NOT NULL
-                   ORDER BY k.embedding <=> $1::vector
+                   ORDER BY similarity DESC
                    LIMIT $5""",
                 embedding_str, project, status_filter, category, limit,
             )
@@ -231,7 +231,7 @@ async def search_knowledge(
         if project is not None:
             rows = await app.pool.fetch(
                 """SELECT DISTINCT k.id, k.project, k.category, k.title, k.content,
-                          k.url, k.tags, k.status
+                          k.url, k.tags, k.status, k.updated_at
                    FROM knowledge k
                    JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
                    JOIN projects p ON p.id = pl.project_id AND p.name = $1
@@ -538,7 +538,7 @@ async def recall_memory(
                    WHERE ($3::text IS NULL OR m.memory_type = $3)
                      AND ($4::text IS NULL OR m.status = $4)
                      AND m.embedding IS NOT NULL
-                   ORDER BY m.embedding <=> $1::vector
+                   ORDER BY similarity DESC
                    LIMIT $5""",
                 embedding_str, project, memory_type, status_filter, limit,
             )
@@ -559,7 +559,7 @@ async def recall_memory(
         if project is not None:
             rows = await app.pool.fetch(
                 """SELECT DISTINCT m.id, m.memory_type, m.name, m.description,
-                          m.content, m.project, m.status
+                          m.content, m.project, m.status, m.updated_at
                    FROM memories m
                    JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
                    JOIN projects p ON p.id = pl.project_id AND p.name = $1
