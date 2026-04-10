@@ -58,6 +58,7 @@ services:
       DB_NAME: ${POSTGRES_DB:-openbrain}
       DB_USER: ${POSTGRES_USER:-openbrain}
       DB_PASS: ${POSTGRES_PASSWORD:?err}
+      ORPHAN_POLICY: ${ORPHAN_POLICY:-archive}
     volumes:
       - ./init.sql:/app/init.sql:ro
     ports:
