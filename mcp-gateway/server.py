@@ -631,6 +631,256 @@ async def list_memories(
     return _format_rows(rows)
 
 
+# --- Archive tools ---
+
+
+@mcp.tool()
+async def archive_knowledge(
+    id: int,
+    ctx: Context = None,
+) -> str:
+    """Archive a knowledge entry. Sets it and all its project links to archived.
+
+    Args:
+        id: Knowledge entry ID
+    """
+    app = _get_app_ctx(ctx)
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE knowledge SET status = 'archived', updated_at = NOW()
+                   WHERE id = $1 AND status = 'active'
+                   RETURNING id, title, status""",
+                id,
+            )
+            if row is None:
+                return json.dumps({"error": f"Knowledge entry {id} not found or already archived"})
+            await conn.execute(
+                """UPDATE project_links SET status = 'archived', archived_at = NOW()
+                   WHERE knowledge_id = $1 AND status = 'active'""",
+                id,
+            )
+    return _format_rows([row])
+
+
+@mcp.tool()
+async def archive_memory(
+    id: int,
+    ctx: Context = None,
+) -> str:
+    """Archive a memory. Sets it and all its project links to archived.
+
+    Args:
+        id: Memory ID
+    """
+    app = _get_app_ctx(ctx)
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE memories SET status = 'archived', updated_at = NOW()
+                   WHERE id = $1 AND status = 'active'
+                   RETURNING id, name, status""",
+                id,
+            )
+            if row is None:
+                return json.dumps({"error": f"Memory {id} not found or already archived"})
+            await conn.execute(
+                """UPDATE project_links SET status = 'archived', archived_at = NOW()
+                   WHERE memory_id = $1 AND status = 'active'""",
+                id,
+            )
+    return _format_rows([row])
+
+
+@mcp.tool()
+async def archive_project(
+    name: str,
+    ctx: Context = None,
+) -> str:
+    """Archive a project. Cascades to all its project links and handles orphans.
+
+    The system 'general' project cannot be archived.
+
+    Orphan policy (per-project setting overrides ORPHAN_POLICY env var):
+    - "archive": orphaned entities are archived
+    - "reassign": orphaned entities are linked to the 'general' project
+
+    Args:
+        name: Project name
+    """
+    app = _get_app_ctx(ctx)
+    async with app.pool.acquire() as conn:
+        async with conn.transaction():
+            proj = await conn.fetchrow(
+                "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
+                name,
+            )
+            if proj is None:
+                return json.dumps({"error": f"Project '{name}' not found"})
+            if proj["status"] == "system":
+                return json.dumps({"error": f"Cannot archive system project '{name}'"})
+            if proj["status"] == "archived":
+                return json.dumps({"error": f"Project '{name}' is already archived"})
+
+            project_id = proj["id"]
+            policy = proj["orphan_policy"] or ORPHAN_POLICY
+
+            await conn.execute(
+                """UPDATE projects SET status = 'archived', updated_at = NOW()
+                   WHERE id = $1""",
+                project_id,
+            )
+
+            linked_knowledge = await conn.fetch(
+                """SELECT knowledge_id FROM project_links
+                   WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+            linked_memories = await conn.fetch(
+                """SELECT memory_id FROM project_links
+                   WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+
+            await conn.execute(
+                """UPDATE project_links SET status = 'archived', archived_at = NOW()
+                   WHERE project_id = $1 AND status = 'active'""",
+                project_id,
+            )
+
+            general_id = await conn.fetchval(
+                "SELECT id FROM projects WHERE name = 'general'"
+            )
+            orphaned_knowledge = []
+            orphaned_memories = []
+
+            for row in linked_knowledge:
+                kid = row["knowledge_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE knowledge_id = $1 AND status = 'active'""",
+                    kid,
+                )
+                if remaining == 0:
+                    orphaned_knowledge.append(kid)
+
+            for row in linked_memories:
+                mid = row["memory_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE memory_id = $1 AND status = 'active'""",
+                    mid,
+                )
+                if remaining == 0:
+                    orphaned_memories.append(mid)
+
+            if policy == "reassign":
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, knowledge_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, memory_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, mid,
+                    )
+            else:  # archive
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """UPDATE knowledge SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """UPDATE memories SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        mid,
+                    )
+
+    result = {
+        "archived_project": name,
+        "orphan_policy": policy,
+        "orphaned_knowledge": len(orphaned_knowledge),
+        "orphaned_memories": len(orphaned_memories),
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def unarchive_knowledge(
+    id: int,
+    ctx: Context = None,
+) -> str:
+    """Restore an archived knowledge entry to active. Project links are NOT
+    automatically restored — use link_to_project to re-associate.
+
+    Args:
+        id: Knowledge entry ID
+    """
+    app = _get_app_ctx(ctx)
+    row = await app.pool.fetchrow(
+        """UPDATE knowledge SET status = 'active', updated_at = NOW()
+           WHERE id = $1 AND status = 'archived'
+           RETURNING id, title, status""",
+        id,
+    )
+    if row is None:
+        return json.dumps({"error": f"Knowledge entry {id} not found or not archived"})
+    return _format_rows([row])
+
+
+@mcp.tool()
+async def unarchive_memory(
+    id: int,
+    ctx: Context = None,
+) -> str:
+    """Restore an archived memory to active. Project links are NOT
+    automatically restored — use link_to_project to re-associate.
+
+    Args:
+        id: Memory ID
+    """
+    app = _get_app_ctx(ctx)
+    row = await app.pool.fetchrow(
+        """UPDATE memories SET status = 'active', updated_at = NOW()
+           WHERE id = $1 AND status = 'archived'
+           RETURNING id, name, status""",
+        id,
+    )
+    if row is None:
+        return json.dumps({"error": f"Memory {id} not found or not archived"})
+    return _format_rows([row])
+
+
+@mcp.tool()
+async def unarchive_project(
+    name: str,
+    ctx: Context = None,
+) -> str:
+    """Restore an archived project to active. Project links are NOT
+    automatically restored — re-link entities manually.
+
+    Args:
+        name: Project name
+    """
+    app = _get_app_ctx(ctx)
+    row = await app.pool.fetchrow(
+        """UPDATE projects SET status = 'active', updated_at = NOW()
+           WHERE name = $1 AND status = 'archived'
+           RETURNING id, name, status""",
+        name,
+    )
+    if row is None:
+        return json.dumps({"error": f"Project '{name}' not found or not archived"})
+    return _format_rows([row])
+
+
 if __name__ == "__main__":
     import asyncio
     print("[startup] Applying database schema...", flush=True)
