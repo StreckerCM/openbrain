@@ -19,10 +19,6 @@ TABLES = [
         "text_columns": ["title", "content", "category", "project"],
     },
     {
-        "name": "shared_resources",
-        "text_columns": ["name", "description", "resource_type"],
-    },
-    {
         "name": "memories",
         "text_columns": ["name", "description", "content", "memory_type"],
     },
