@@ -398,6 +398,58 @@ async def get_project(
     return _format_rows([row])
 
 
+@mcp.tool()
+async def update_project(
+    name: str,
+    description: str | None = None,
+    repo_url: str | None = None,
+    tech_stack: list[str] | None = None,
+    notes: str | None = None,
+    orphan_policy: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Update an existing project's details. Only provided fields are changed.
+
+    Args:
+        name: Project name (lookup key, cannot be changed)
+        description: New description
+        repo_url: New repository URL
+        tech_stack: New tech stack list
+        notes: New notes
+        orphan_policy: Orphan handling: "archive" or "reassign"
+    """
+    if orphan_policy is not None and orphan_policy not in ("archive", "reassign"):
+        return json.dumps({"error": "orphan_policy must be 'archive' or 'reassign'"})
+    app = _get_app_ctx(ctx)
+    # Build dynamic UPDATE
+    sets = []
+    params = []
+    idx = 1
+    for col, val in [
+        ("description", description),
+        ("repo_url", repo_url),
+        ("tech_stack", tech_stack),
+        ("notes", notes),
+        ("orphan_policy", orphan_policy),
+    ]:
+        if val is not None:
+            sets.append(f"{col} = ${idx}")
+            params.append(val)
+            idx += 1
+    if not sets:
+        return json.dumps({"error": "No fields to update"})
+    sets.append(f"updated_at = NOW()")
+    params.append(name)
+    query = f"""UPDATE projects SET {', '.join(sets)}
+                WHERE name = ${idx}
+                RETURNING id, name, description, repo_url, tech_stack, notes,
+                          status, orphan_policy, updated_at"""
+    row = await app.pool.fetchrow(query, *params)
+    if row is None:
+        return json.dumps({"error": f"Project '{name}' not found"})
+    return _format_rows([row])
+
+
 # --- Memory tools ---
 
 
