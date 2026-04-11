@@ -222,19 +222,19 @@ function ProjectDetail({ name }) {
             `}
 
             <div style="margin-top:24px;">
-                <div class="tab-bar">
-                    <button
-                        class=${'tab-btn' + (activeTab === 'knowledge' ? ' active' : '')}
+                <div class="tabs">
+                    <div
+                        class=${'tab' + (activeTab === 'knowledge' ? ' active' : '')}
                         onClick=${() => setActiveTab('knowledge')}
                     >
-                        Knowledge (${linkedKnowledge.length})
-                    </button>
-                    <button
-                        class=${'tab-btn' + (activeTab === 'memories' ? ' active' : '')}
+                        Knowledge <span class="tab-count">${linkedKnowledge.length}</span>
+                    </div>
+                    <div
+                        class=${'tab' + (activeTab === 'memories' ? ' active' : '')}
                         onClick=${() => setActiveTab('memories')}
                     >
-                        Memories (${linkedMemories.length})
-                    </button>
+                        Memories <span class="tab-count">${linkedMemories.length}</span>
+                    </div>
                 </div>
 
                 ${tabLoading && html`<div class="loading-center"><div class="spinner"></div></div>`}
@@ -244,23 +244,32 @@ function ProjectDetail({ name }) {
                 `}
 
                 ${!tabLoading && currentItems.length > 0 && html`
-                    <div class="linked-items-list">
+                    <div class="flex flex-col gap-8">
                         ${currentItems.map(item => html`
-                            <div key=${item.id} class="linked-item">
-                                <a
-                                    href=${'#/' + activeTab + '/' + item.id}
-                                    onClick=${e => { e.preventDefault(); navigate('#/' + activeTab + '/' + item.id); }}
-                                    class="linked-item-title"
-                                >
-                                    ${item.title || item.name || 'Untitled'}
-                                </a>
-                                <button
-                                    class="btn btn-sm btn-secondary"
-                                    onClick=${() => handleUnlink(activeTab, item.id)}
-                                    title="Unlink from project"
-                                >
-                                    Unlink
-                                </button>
+                            <div key=${item.id} class="card flex justify-between items-center" style="padding:10px 14px;">
+                                <div>
+                                    <a
+                                        href=${'#/' + activeTab + '/' + item.id}
+                                        onClick=${e => { e.preventDefault(); navigate('#/' + activeTab + '/' + item.id); }}
+                                        style="font-size:13px;"
+                                    >
+                                        ${item.title || item.name || 'Untitled'}
+                                    </a>
+                                    <span style="color:var(--text-3);font-size:11px;margin-left:8px;">
+                                        ${item.category || item.memory_type || ''}
+                                    </span>
+                                </div>
+                                <div class="flex gap-8 items-center">
+                                    <span style="color:var(--text-3);font-size:11px;">${item.updated_at ? new Date(item.updated_at).toLocaleDateString() : ''}</span>
+                                    <button
+                                        class="btn btn-sm btn-secondary"
+                                        style="color:var(--danger);"
+                                        onClick=${(e) => { e.stopPropagation(); handleUnlink(activeTab, item.id); }}
+                                        title="Unlink from project"
+                                    >
+                                        Unlink
+                                    </button>
+                                </div>
                             </div>
                         `)}
                     </div>

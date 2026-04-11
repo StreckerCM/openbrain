@@ -333,5 +333,6 @@ export function KnowledgePage({ param = '', query = {} }) {
         return html`<${KnowledgeForm} id=${id} />`;
     }
     if (param && !isNaN(param)) return html`<${KnowledgeDetail} id=${param} />`;
-    return html`<${KnowledgeList} initialTag=${query.tag || ''} />`;
+    const tag = query.tag || '';
+    return html`<${KnowledgeList} key=${'list-' + tag} initialTag=${tag} />`;
 }
