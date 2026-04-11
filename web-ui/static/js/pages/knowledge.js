@@ -51,11 +51,11 @@ function KnowledgeList({ initialTag = '' }) {
             params.push(`category=eq.${encodeURIComponent(filters.category)}`);
         }
         if (filters.project) {
-            params.push(`projects=cs.{${encodeURIComponent(filters.project)}}`);
+            params.push(`projects=cs.%7B${encodeURIComponent(filters.project)}%7D`);
         }
         const tagFilter = filters.tag || initialTag;
         if (tagFilter) {
-            params.push(`tags=cs.{${encodeURIComponent(tagFilter)}}`);
+            params.push(`tags=cs.%7B${encodeURIComponent(tagFilter)}%7D`);
         }
         return readKnowledge(params.join('&'));
     }

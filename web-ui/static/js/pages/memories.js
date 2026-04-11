@@ -56,7 +56,7 @@ function MemoriesList() {
             params.push(`memory_type=eq.${encodeURIComponent(filters.memory_type)}`);
         }
         if (filters.project) {
-            params.push(`projects=cs.{${encodeURIComponent(filters.project)}}`);
+            params.push(`projects=cs.%7B${encodeURIComponent(filters.project)}%7D`);
         }
         return readMemories(params.join('&'));
     }
