@@ -287,6 +287,14 @@ a:hover { color: var(--accent-hover); }
     .detail-header { flex-direction: column; }
     .detail-actions { width: 100%; }
     .meta-row { flex-direction: column; gap: 6px; }
+    .tabs { flex-wrap: wrap; }
+    .tab { padding: 8px 12px; font-size: 12px; }
+    .bulk-bar { flex-direction: column; gap: 8px; align-items: stretch; text-align: center; }
+    .bulk-bar .flex { justify-content: center; }
+    .archive-row { flex-wrap: wrap; gap: 8px !important; }
+    .archive-col-date, .archive-col-prov { display: none; }
+    .archive-col-type { width: auto !important; }
+    .archive-col-action { width: auto !important; margin-left: auto; }
 }
 
 /* Meta items in meta-row */

@@ -180,36 +180,36 @@ export function ArchivePage() {
 
             ${visible.length > 0 && html`
                 <div>
-                    <div class="card flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px; font-size:11px; text-transform:uppercase; color:var(--text-3);">
+                    <div class="card archive-row flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px; font-size:11px; text-transform:uppercase; color:var(--text-3);">
                         <input
                             type="checkbox"
                             checked=${visible.length > 0 && visible.every(i => selected.has(i._key))}
                             onChange=${toggleAll}
                             style="width:16px; height:16px; cursor:pointer;"
                         />
-                        <span style="width:90px;">Type</span>
+                        <span class="archive-col-type" style="width:90px;">Type</span>
                         <span style="flex:1;">Title</span>
-                        <span style="width:100px;">Archived</span>
-                        <span style="width:100px;">Provenance</span>
-                        <span style="width:80px;"></span>
+                        <span class="archive-col-date" style="width:100px;">Archived</span>
+                        <span class="archive-col-prov" style="width:100px;">Provenance</span>
+                        <span class="archive-col-action" style="width:80px;"></span>
                     </div>
                     ${visible.map(item => html`
-                        <div key=${item._key} class="card flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px;">
+                        <div key=${item._key} class="card archive-row flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px;">
                             <input
                                 type="checkbox"
                                 checked=${selected.has(item._key)}
                                 onChange=${() => toggleSelect(item._key)}
                                 style="width:16px; height:16px; cursor:pointer;"
                             />
-                            <span style="width:90px;">
+                            <span class="archive-col-type" style="width:90px;">
                                 <span class=${'badge badge-' + item._type}>${item._type}</span>
                             </span>
                             <span style="flex:1; font-size:13px; font-weight:500;">${item.title || item.name || 'Untitled'}</span>
-                            <span style="width:100px; font-size:12px; color:var(--text-3);">
+                            <span class="archive-col-date" style="width:100px; font-size:12px; color:var(--text-3);">
                                 ${item.updated_at ? new Date(item.updated_at).toLocaleDateString() : '-'}
                             </span>
-                            <span style="width:100px; font-size:12px; color:var(--text-3);">${item.provenance || '-'}</span>
-                            <span style="width:80px;">
+                            <span class="archive-col-prov" style="width:100px; font-size:12px; color:var(--text-3);">${item.provenance || '-'}</span>
+                            <span class="archive-col-action" style="width:80px;">
                                 <button class="btn btn-sm btn-secondary" onClick=${() => handleRestore(item)}>Restore</button>
                             </span>
                         </div>
