@@ -93,6 +93,8 @@ services:
     restart: unless-stopped
     ports:
       - "3010:80"
+    environment:
+      SENTRY_DSN: ${SENTRY_DSN:-}
     networks:
       - default
       - nginxproxymanager_default

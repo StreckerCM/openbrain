@@ -1,0 +1,1 @@
+window.SENTRY_DSN = '';
