@@ -16,10 +16,10 @@ const html = htm.bind(h);
 const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'];
 
 const TYPE_COLORS = {
-    user: 'green',
-    feedback: 'amber',
-    project: 'purple',
-    reference: 'blue',
+    user: 'user',
+    feedback: 'feedback',
+    project: 'project',
+    reference: 'reference',
 };
 
 function timeAgo(dateStr) {
