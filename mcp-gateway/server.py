@@ -90,15 +90,10 @@ async def _apply_schema() -> None:
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    pool = await asyncpg.create_pool(
-        host=DB_HOST, port=DB_PORT, database=DB_NAME,
-        user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
-    )
-    async with httpx.AsyncClient() as http:
-        try:
-            yield AppContext(pool=pool, http=http)
-        finally:
-            await pool.close()
+    # Reuse the shared pool created by _rest_lifespan instead of creating a
+    # second connection pool.  The REST app owns pool lifecycle; MCP tools
+    # simply reference the same AppContext.
+    yield _rest_app_ctx
 
 
 mcp = FastMCP(
@@ -112,7 +107,9 @@ mcp = FastMCP(
 
 
 def _get_app_ctx(ctx: Context) -> AppContext:
-    return ctx.request_context.lifespan_context
+    # Use the shared module-level context so MCP tools share the same DB pool
+    # and httpx client as the REST endpoints.
+    return _rest_app_ctx
 
 
 async def get_embedding(http: httpx.AsyncClient, text: str) -> list[float] | None:
