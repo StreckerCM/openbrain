@@ -59,6 +59,7 @@ services:
       DB_USER: ${POSTGRES_USER:-openbrain}
       DB_PASS: ${POSTGRES_PASSWORD:?err}
       ORPHAN_POLICY: ${ORPHAN_POLICY:-archive}
+      SENTRY_DSN: ${SENTRY_DSN:-}
     volumes:
       - ./init.sql:/app/init.sql:ro
     ports:
@@ -82,6 +83,7 @@ services:
       DB_USER: ${POSTGRES_USER:-openbrain}
       DB_PASS: ${POSTGRES_PASSWORD:?err}
       POLL_INTERVAL: "30"
+      SENTRY_DSN: ${SENTRY_DSN:-}
     depends_on:
       db:
         condition: service_healthy
