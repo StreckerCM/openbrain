@@ -85,14 +85,15 @@ export function ProjectChips({ projects = [], onRemove, onAdd, readOnly = false 
     `;
 }
 
-export function TagChips({ tags = [] }) {
+export function TagChips({ tags = [], linkBase = '' }) {
     if (!tags || tags.length === 0) return null;
 
     return html`
         <div class="flex flex-wrap gap-4">
-            ${tags.map(tag => html`
-                <span key=${tag} class="chip chip-tag">${tag}</span>
-            `)}
+            ${tags.map(tag => linkBase
+                ? html`<a key=${tag} class="chip chip-tag-link" href=${linkBase + encodeURIComponent(tag)}>${tag}</a>`
+                : html`<span key=${tag} class="chip chip-tag">${tag}</span>`
+            )}
         </div>
     `;
 }

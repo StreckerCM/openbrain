@@ -34,7 +34,7 @@ export function readKnowledge(params = '') {
 }
 
 export function readKnowledgeById(id) {
-    return request(`${READ_BASE}/knowledge?id=eq.${id}&select=*`);
+    return request(`${READ_BASE}/knowledge_with_projects?id=eq.${id}`);
 }
 
 export function readMemories(params = '') {
@@ -42,7 +42,7 @@ export function readMemories(params = '') {
 }
 
 export function readMemoryById(id) {
-    return request(`${READ_BASE}/memories?id=eq.${id}&select=*`);
+    return request(`${READ_BASE}/memories_with_projects?id=eq.${id}`);
 }
 
 export function readProjects(params = '') {

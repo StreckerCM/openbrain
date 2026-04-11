@@ -7,10 +7,10 @@ import { SearchBar } from '../components/search-bar.js';
 
 const html = htm.bind(h);
 
-function similarityColor(score) {
-    if (score >= 0.8) return 'var(--green)';
-    if (score >= 0.6) return 'var(--amber)';
-    return 'var(--text-3)';
+function similarityClass(score) {
+    if (score >= 0.9) return 'similarity-high';
+    if (score >= 0.75) return 'similarity-medium';
+    return 'similarity-low';
 }
 
 function snippet(text, maxLen = 200) {
@@ -68,37 +68,39 @@ export function SearchPage() {
                     ${results.map((item, i) => {
                         const simPct = item.similarity != null ? Math.round(item.similarity * 100) : null;
                         const projects = item.projects || [];
+                        const simCls = item.similarity != null ? similarityClass(item.similarity) : '';
                         return html`
                             <div
                                 key=${item.id || i}
-                                class="search-result-card"
+                                class="card search-result"
                                 onClick=${() => navigate(getRoute(item))}
+                                style="margin-bottom:8px;"
                             >
-                                <div class="search-result-header">
-                                    <span class=${'badge badge-' + (item.type || 'knowledge')}>${item.type || 'unknown'}</span>
-                                    <span class="search-result-title">${item.title || item.name || 'Untitled'}</span>
+                                <div class="flex items-center justify-between" style="margin-bottom:8px;">
+                                    <div class="flex items-center gap-8">
+                                        <span class=${'badge badge-' + (item.type || 'knowledge')}>${item.type || 'unknown'}</span>
+                                        <span style="font-weight:500; font-size:14px;">${item.title || item.name || 'Untitled'}</span>
+                                    </div>
                                     ${simPct != null && html`
-                                        <span
-                                            class="search-result-similarity"
-                                            style=${'color:' + similarityColor(item.similarity)}
-                                        >
-                                            ${simPct}%
-                                        </span>
+                                        <span class=${'badge ' + simCls}>${simPct}%</span>
                                     `}
                                 </div>
                                 ${item.content && html`
-                                    <div class="search-result-snippet">${snippet(item.content)}</div>
-                                `}
-                                ${projects.length > 0 && html`
-                                    <div class="flex flex-wrap gap-4" style="margin-top:6px;">
-                                        ${projects.map(p => html`
-                                            <span key=${p} class="chip chip-project" style="font-size:11px;">${p}</span>
-                                        `)}
+                                    <div style="font-size:13px; color:var(--text-2); margin-bottom:8px; line-height:1.5;">
+                                        ${snippet(item.content)}
                                     </div>
                                 `}
-                                ${item.category && html`
-                                    <span class="meta-item" style="margin-top:4px; font-size:11px;">Category: ${item.category}</span>
-                                `}
+                                <div class="flex items-center flex-wrap gap-8" style="font-size:11px; color:var(--text-3);">
+                                    ${projects.map(p => html`
+                                        <span key=${p} class="chip chip-project">${p}</span>
+                                    `)}
+                                    ${item.category && html`
+                                        <span class="badge">${item.category}</span>
+                                    `}
+                                    ${item.updated_at && html`
+                                        <span>${new Date(item.updated_at).toLocaleDateString()}</span>
+                                    `}
+                                </div>
                             </div>
                         `;
                     })}

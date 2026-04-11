@@ -272,3 +272,26 @@ a:hover { color: var(--accent-hover); }
 .mb-12 { margin-bottom: 12px; }
 .mb-16 { margin-bottom: 16px; }
 .mb-20 { margin-bottom: 20px; }
+
+/* Detail page header */
+.detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 16px; }
+.detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* Meta items in meta-row */
+.meta-item { font-size: 12px; color: var(--text-3); }
+.meta-item span { color: var(--text-1); }
+.meta-link { color: var(--accent); word-break: break-all; }
+.meta-link:hover { color: var(--accent-hover); }
+
+/* Category badge */
+.badge-category { background: #2a2a3a; color: #94a3b8; }
+
+/* Warning badge (orphan) */
+.badge-warning { background: #2e2a1a; color: #f59e0b; }
+
+/* Clickable tag chip */
+.chip-tag-link {
+    background: var(--tag-bg); color: var(--tag-text);
+    cursor: pointer; text-decoration: none;
+}
+.chip-tag-link:hover { opacity: 0.85; color: var(--tag-text); }

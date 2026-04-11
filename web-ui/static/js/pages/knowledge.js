@@ -51,7 +51,7 @@ function KnowledgeList() {
             params.push(`category=eq.${encodeURIComponent(filters.category)}`);
         }
         if (filters.project) {
-            params.push(`projects=cs.["${encodeURIComponent(filters.project)}"]`);
+            params.push(`projects=cs.{${encodeURIComponent(filters.project)}}`);
         }
         return readKnowledge(params.join('&'));
     }
@@ -213,7 +213,7 @@ function KnowledgeDetail({ id }) {
             ${tags.length > 0 && html`
                 <div style="margin:16px 0;">
                     <label class="form-label">Tags</label>
-                    <${TagChips} tags=${tags} />
+                    <${TagChips} tags=${tags} linkBase="#/knowledge?tag=" />
                 </div>
             `}
 

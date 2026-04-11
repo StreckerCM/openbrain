@@ -143,26 +143,28 @@ export function ArchivePage() {
         <div>
             <h1 class="page-title">Archive</h1>
 
-            <div class="tab-bar" style="margin-bottom:16px;">
-                <button class=${'tab-btn' + (filter === 'all' ? ' active' : '')} onClick=${() => setFilter('all')}>
-                    All (${items.length})
-                </button>
-                <button class=${'tab-btn' + (filter === 'knowledge' ? ' active' : '')} onClick=${() => setFilter('knowledge')}>
-                    Knowledge (${countByType('knowledge')})
-                </button>
-                <button class=${'tab-btn' + (filter === 'memories' ? ' active' : '')} onClick=${() => setFilter('memories')}>
-                    Memories (${countByType('memories')})
-                </button>
-                <button class=${'tab-btn' + (filter === 'projects' ? ' active' : '')} onClick=${() => setFilter('projects')}>
-                    Projects (${countByType('projects')})
-                </button>
+            <div class="tabs">
+                <span class=${'tab' + (filter === 'all' ? ' active' : '')} onClick=${() => setFilter('all')}>
+                    All <span class="tab-count">${items.length}</span>
+                </span>
+                <span class=${'tab' + (filter === 'knowledge' ? ' active' : '')} onClick=${() => setFilter('knowledge')}>
+                    Knowledge <span class="tab-count">${countByType('knowledge')}</span>
+                </span>
+                <span class=${'tab' + (filter === 'memories' ? ' active' : '')} onClick=${() => setFilter('memories')}>
+                    Memories <span class="tab-count">${countByType('memories')}</span>
+                </span>
+                <span class=${'tab' + (filter === 'projects' ? ' active' : '')} onClick=${() => setFilter('projects')}>
+                    Projects <span class="tab-count">${countByType('projects')}</span>
+                </span>
             </div>
 
             ${selectedCount > 0 && html`
-                <div class="bulk-action-bar">
+                <div class="bulk-bar">
                     <span>${selectedCount} selected</span>
-                    <button class="btn btn-secondary" onClick=${handleRestoreSelected}>Restore Selected</button>
-                    <button class="btn btn-danger" onClick=${() => setShowDeleteModal(true)}>Permanently Delete</button>
+                    <div class="flex gap-8">
+                        <button class="btn btn-secondary btn-sm" onClick=${handleRestoreSelected}>Restore Selected</button>
+                        <button class="btn btn-danger btn-sm" onClick=${() => setShowDeleteModal(true)}>Permanently Delete</button>
+                    </div>
                 </div>
             `}
 
@@ -171,41 +173,39 @@ export function ArchivePage() {
             `}
 
             ${visible.length > 0 && html`
-                <div class="archive-list">
-                    <div class="archive-header">
-                        <label class="archive-checkbox-cell">
-                            <input
-                                type="checkbox"
-                                checked=${visible.length > 0 && visible.every(i => selected.has(i._key))}
-                                onChange=${toggleAll}
-                            />
-                        </label>
-                        <div>Type</div>
-                        <div>Title</div>
-                        <div>Archived</div>
-                        <div>Provenance</div>
-                        <div></div>
+                <div>
+                    <div class="card flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px; font-size:11px; text-transform:uppercase; color:var(--text-3);">
+                        <input
+                            type="checkbox"
+                            checked=${visible.length > 0 && visible.every(i => selected.has(i._key))}
+                            onChange=${toggleAll}
+                            style="width:16px; height:16px; cursor:pointer;"
+                        />
+                        <span style="width:90px;">Type</span>
+                        <span style="flex:1;">Title</span>
+                        <span style="width:100px;">Archived</span>
+                        <span style="width:100px;">Provenance</span>
+                        <span style="width:80px;"></span>
                     </div>
                     ${visible.map(item => html`
-                        <div key=${item._key} class="archive-row">
-                            <label class="archive-checkbox-cell">
-                                <input
-                                    type="checkbox"
-                                    checked=${selected.has(item._key)}
-                                    onChange=${() => toggleSelect(item._key)}
-                                />
-                            </label>
-                            <div>
+                        <div key=${item._key} class="card flex items-center gap-12" style="padding:10px 16px; margin-bottom:4px;">
+                            <input
+                                type="checkbox"
+                                checked=${selected.has(item._key)}
+                                onChange=${() => toggleSelect(item._key)}
+                                style="width:16px; height:16px; cursor:pointer;"
+                            />
+                            <span style="width:90px;">
                                 <span class=${'badge badge-' + item._type}>${item._type}</span>
-                            </div>
-                            <div class="archive-title">${item.title || item.name || 'Untitled'}</div>
-                            <div class="archive-date">
+                            </span>
+                            <span style="flex:1; font-size:13px; font-weight:500;">${item.title || item.name || 'Untitled'}</span>
+                            <span style="width:100px; font-size:12px; color:var(--text-3);">
                                 ${item.updated_at ? new Date(item.updated_at).toLocaleDateString() : '-'}
-                            </div>
-                            <div class="archive-provenance">${item.provenance || '-'}</div>
-                            <div>
+                            </span>
+                            <span style="width:100px; font-size:12px; color:var(--text-3);">${item.provenance || '-'}</span>
+                            <span style="width:80px;">
                                 <button class="btn btn-sm btn-secondary" onClick=${() => handleRestore(item)}>Restore</button>
-                            </div>
+                            </span>
                         </div>
                     `)}
                 </div>
