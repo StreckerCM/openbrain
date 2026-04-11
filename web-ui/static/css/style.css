@@ -184,7 +184,7 @@ a:hover { color: var(--accent-hover); }
 }
 .md-toggle-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-.md-content {
+.md-content { overflow-wrap: break-word; word-break: break-word;
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
     padding: 20px; font-size: 13px; line-height: 1.7; color: var(--text-1);
 }
@@ -283,6 +283,11 @@ a:hover { color: var(--accent-hover); }
 /* Detail page header */
 .detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 16px; }
 .detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+@media (max-width: 768px) {
+    .detail-header { flex-direction: column; }
+    .detail-actions { width: 100%; }
+    .meta-row { flex-direction: column; gap: 6px; }
+}
 
 /* Meta items in meta-row */
 .meta-item { font-size: 12px; color: var(--text-3); }
