@@ -85,10 +85,115 @@ CREATE INDEX IF NOT EXISTS project_links_knowledge_idx ON project_links (knowled
 CREATE INDEX IF NOT EXISTS project_links_memory_idx ON project_links (memory_id) WHERE memory_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS project_links_status_idx ON project_links (status);
 
+-- ============================================================
+-- Migration: ensure columns exist on older databases (idempotent)
+-- ============================================================
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS url TEXT;
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS orphan_policy TEXT;
+
+-- Rename 'general' to 'General' if upgrading from older schema
+UPDATE projects SET name = 'General' WHERE name = 'general';
+UPDATE knowledge SET project = 'General' WHERE project = 'general';
+UPDATE memories SET project = 'General' WHERE project = 'general';
+
 -- Seed the default 'General' project
 INSERT INTO projects (name, description, status)
 VALUES ('General', 'Default project for non-project-specific knowledge and memories', 'system')
+ON CONFLICT (name) DO UPDATE SET status = 'system';
+
+-- Backfill project_links from knowledge.project (idempotent)
+INSERT INTO projects (name, status)
+SELECT DISTINCT k.project, 'active'
+FROM knowledge k
+WHERE k.project IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = k.project)
 ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO project_links (project_id, knowledge_id, status)
+SELECT p.id, k.id, 'active'
+FROM knowledge k
+JOIN projects p ON p.name = k.project
+WHERE k.project IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM project_links pl
+      WHERE pl.project_id = p.id AND pl.knowledge_id = k.id
+  );
+
+-- Backfill project_links from memories.project (idempotent)
+INSERT INTO projects (name, status)
+SELECT DISTINCT m.project, 'active'
+FROM memories m
+WHERE m.project IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = m.project)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO project_links (project_id, memory_id, status)
+SELECT p.id, m.id, 'active'
+FROM memories m
+JOIN projects p ON p.name = m.project
+WHERE m.project IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM project_links pl
+      WHERE pl.project_id = p.id AND pl.memory_id = m.id
+  );
+
+-- Migrate shared_resources if table exists
+DO $$
+DECLARE
+    sr RECORD;
+    new_knowledge_id INT;
+    proj_id INT;
+    content_text TEXT;
+    proj_name TEXT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'shared_resources') THEN
+        RETURN;
+    END IF;
+
+    FOR sr IN SELECT * FROM shared_resources LOOP
+        content_text := COALESCE(sr.description, sr.name);
+        IF sr.metadata IS NOT NULL AND sr.metadata::text != '{}' THEN
+            content_text := content_text || E'\n\nMetadata:\n' || jsonb_pretty(sr.metadata);
+        END IF;
+
+        SELECT k.id INTO new_knowledge_id
+        FROM knowledge k
+        WHERE k.title = sr.name AND k.category = sr.resource_type
+        LIMIT 1;
+
+        IF new_knowledge_id IS NULL THEN
+            INSERT INTO knowledge (project, category, title, content, url, status)
+            VALUES ('General', sr.resource_type, sr.name, content_text, sr.url, 'active')
+            RETURNING id INTO new_knowledge_id;
+        END IF;
+
+        IF sr.projects IS NOT NULL THEN
+            FOREACH proj_name IN ARRAY sr.projects LOOP
+                INSERT INTO projects (name, status)
+                VALUES (proj_name, 'active')
+                ON CONFLICT (name) DO NOTHING;
+
+                SELECT p.id INTO proj_id FROM projects p WHERE p.name = proj_name;
+
+                INSERT INTO project_links (project_id, knowledge_id, status)
+                VALUES (proj_id, new_knowledge_id, 'active')
+                ON CONFLICT DO NOTHING;
+            END LOOP;
+        ELSE
+            SELECT p.id INTO proj_id FROM projects p WHERE p.name = 'General';
+            INSERT INTO project_links (project_id, knowledge_id, status)
+            VALUES (proj_id, new_knowledge_id, 'active')
+            ON CONFLICT DO NOTHING;
+        END IF;
+    END LOOP;
+END $$;
+
+-- Drop shared_resources if it was migrated
+DROP FUNCTION IF EXISTS search_shared_resources(vector(1536), INT, TEXT, TEXT);
+DROP TABLE IF EXISTS shared_resources;
 
 -- Status and URL indexes
 CREATE INDEX IF NOT EXISTS knowledge_status_idx ON knowledge (status);
@@ -190,6 +295,11 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- Drop views before recreating (column changes cause mismatches on upgrades)
+DROP VIEW IF EXISTS knowledge_with_projects CASCADE;
+DROP VIEW IF EXISTS memories_with_projects CASCADE;
+DROP VIEW IF EXISTS recent_activity CASCADE;
 
 -- View: knowledge items with their associated project names
 CREATE OR REPLACE VIEW knowledge_with_projects AS
