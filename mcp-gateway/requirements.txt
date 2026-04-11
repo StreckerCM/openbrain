@@ -1,3 +1,5 @@
 mcp[http]
 asyncpg
 httpx
+sentry-sdk[starlette]
+uvicorn
