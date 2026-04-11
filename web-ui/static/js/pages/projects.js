@@ -124,8 +124,8 @@ function ProjectDetail({ name }) {
         setTabLoading(true);
 
         const fetchLinked = activeTab === 'knowledge'
-            ? readKnowledge(`projects=cs.["${encodeURIComponent(decodedName)}"]&status=eq.active&order=updated_at.desc&limit=50`)
-            : readMemories(`projects=cs.["${encodeURIComponent(decodedName)}"]&status=eq.active&order=updated_at.desc&limit=50`);
+            ? readKnowledge(`projects=cs.{${encodeURIComponent(decodedName)}}&status=eq.active&order=updated_at.desc&limit=50`)
+            : readMemories(`projects=cs.{${encodeURIComponent(decodedName)}}&status=eq.active&order=updated_at.desc&limit=50`);
 
         fetchLinked.then(data => {
             if (!cancelled) {
@@ -163,8 +163,8 @@ function ProjectDetail({ name }) {
             addToast('Unlinked successfully.', 'success');
             // Refresh current tab
             const fetchLinked = type === 'knowledge'
-                ? readKnowledge(`projects=cs.["${encodeURIComponent(decodedName)}"]&status=eq.active&order=updated_at.desc&limit=50`)
-                : readMemories(`projects=cs.["${encodeURIComponent(decodedName)}"]&status=eq.active&order=updated_at.desc&limit=50`);
+                ? readKnowledge(`projects=cs.{${encodeURIComponent(decodedName)}}&status=eq.active&order=updated_at.desc&limit=50`)
+                : readMemories(`projects=cs.{${encodeURIComponent(decodedName)}}&status=eq.active&order=updated_at.desc&limit=50`);
             const data = await fetchLinked;
             const arr = Array.isArray(data) ? data : [];
             if (type === 'knowledge') setLinkedKnowledge(arr);

@@ -1410,7 +1410,9 @@ def _get_http() -> httpx.AsyncClient:
 
 
 def _json(data, status_code: int = 200) -> JSONResponse:
-    return JSONResponse(data, status_code=status_code)
+    import json as _json_mod
+    body = _json_mod.loads(_json_mod.dumps(data, default=str))
+    return JSONResponse(body, status_code=status_code)
 
 
 def _err(message: str, status_code: int = 400) -> JSONResponse:
