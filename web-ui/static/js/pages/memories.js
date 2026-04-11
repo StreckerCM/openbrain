@@ -158,7 +158,7 @@ function MemoryDetail({ id }) {
 
     async function handleArchive() {
         try {
-            await archiveItem('memories', id);
+            await archiveItem('memory', id);
             addToast('Memory archived.', 'success');
             navigate('#/memories');
         } catch (_) {}

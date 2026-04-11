@@ -13,17 +13,23 @@ import { ProjectsPage } from './pages/projects.js';
 import { SearchPage } from './pages/search.js';
 import { ArchivePage } from './pages/archive.js';
 
+function parseRoute(route) {
+    const path = route.replace('#/', '').split('?')[0];
+    const qsRaw = route.split('?')[1] || '';
+    const query = Object.fromEntries(new URLSearchParams(qsRaw));
+    const [base, ...rest] = path.split('/');
+    return { base: base || '', param: rest.join('/'), query };
+}
+
 function Router() {
-    const route = currentRoute.value;
-    const [base, ...rest] = route.replace('#/', '').split('/');
-    const param = rest.join('/');
+    const { base, param, query } = parseRoute(currentRoute.value);
 
     switch (base) {
         case '': return html`<${DashboardPage} />`;
-        case 'knowledge': return html`<${KnowledgePage} param=${param} />`;
-        case 'memories': return html`<${MemoriesPage} param=${param} />`;
-        case 'projects': return html`<${ProjectsPage} param=${param} />`;
-        case 'search': return html`<${SearchPage} />`;
+        case 'knowledge': return html`<${KnowledgePage} param=${param} query=${query} />`;
+        case 'memories': return html`<${MemoriesPage} param=${param} query=${query} />`;
+        case 'projects': return html`<${ProjectsPage} param=${param} query=${query} />`;
+        case 'search': return html`<${SearchPage} query=${query} />`;
         case 'archive': return html`<${ArchivePage} />`;
         default: return html`<${DashboardPage} />`;
     }

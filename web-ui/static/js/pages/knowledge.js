@@ -30,7 +30,7 @@ function timeAgo(dateStr) {
 
 // --- List View ---
 
-function KnowledgeList() {
+function KnowledgeList({ initialTag = '' }) {
     const [allProjects, setAllProjects] = useState([]);
 
     useEffect(() => {
@@ -52,6 +52,10 @@ function KnowledgeList() {
         }
         if (filters.project) {
             params.push(`projects=cs.{${encodeURIComponent(filters.project)}}`);
+        }
+        const tagFilter = filters.tag || initialTag;
+        if (tagFilter) {
+            params.push(`tags=cs.{${encodeURIComponent(tagFilter)}}`);
         }
         return readKnowledge(params.join('&'));
     }
@@ -322,12 +326,12 @@ function KnowledgeForm({ id }) {
 
 // --- Router ---
 
-export function KnowledgePage({ param = '' }) {
+export function KnowledgePage({ param = '', query = {} }) {
     if (param === 'new') return html`<${KnowledgeForm} />`;
     if (param.endsWith('/edit')) {
         const id = param.replace('/edit', '');
         return html`<${KnowledgeForm} id=${id} />`;
     }
     if (param && !isNaN(param)) return html`<${KnowledgeDetail} id=${param} />`;
-    return html`<${KnowledgeList} />`;
+    return html`<${KnowledgeList} initialTag=${query.tag || ''} />`;
 }

@@ -57,7 +57,7 @@ function ProjectList() {
                 ${projects.map(p => html`
                     <div
                         key=${p.name}
-                        class="project-card"
+                        class="card project-card"
                         onClick=${() => navigate('#/projects/' + encodeURIComponent(p.name))}
                     >
                         <div class="project-card-header">
@@ -147,7 +147,7 @@ function ProjectDetail({ name }) {
 
     async function handleArchive() {
         try {
-            await archiveItem('projects', decodedName);
+            await archiveItem('project', decodedName);
             addToast('Project archived.', 'success');
             navigate('#/projects');
         } catch (_) {}
