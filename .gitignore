@@ -1,3 +1,5 @@
 .env
 .worktrees/
 .superpowers/
+*.dump
+*.png

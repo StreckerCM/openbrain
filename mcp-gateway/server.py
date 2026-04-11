@@ -8,6 +8,18 @@ import asyncpg
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
 
+import sentry_sdk
+
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=0.1,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+        release=os.environ.get("SENTRY_RELEASE", "openbrain@0.1.0"),
+    )
+    sentry_sdk.set_tag("service", "mcp-gateway")
+
 DB_HOST = os.environ.get("DB_HOST", "db")
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 DB_NAME = os.environ.get("DB_NAME", "openbrain")
@@ -78,15 +90,10 @@ async def _apply_schema() -> None:
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    pool = await asyncpg.create_pool(
-        host=DB_HOST, port=DB_PORT, database=DB_NAME,
-        user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
-    )
-    async with httpx.AsyncClient() as http:
-        try:
-            yield AppContext(pool=pool, http=http)
-        finally:
-            await pool.close()
+    # Reuse the shared pool created by _rest_lifespan instead of creating a
+    # second connection pool.  The REST app owns pool lifecycle; MCP tools
+    # simply reference the same AppContext.
+    yield _rest_app_ctx
 
 
 mcp = FastMCP(
@@ -100,7 +107,9 @@ mcp = FastMCP(
 
 
 def _get_app_ctx(ctx: Context) -> AppContext:
-    return ctx.request_context.lifespan_context
+    # Use the shared module-level context so MCP tools share the same DB pool
+    # and httpx client as the REST endpoints.
+    return _rest_app_ctx
 
 
 async def get_embedding(http: httpx.AsyncClient, text: str) -> list[float] | None:
@@ -125,31 +134,22 @@ def _format_rows(rows: list[asyncpg.Record]) -> str:
     return json.dumps([dict(r) for r in rows], default=str, indent=2)
 
 
-# --- Knowledge tools ---
+# ---------------------------------------------------------------------------
+# Shared DB functions (used by both MCP tools and REST endpoints)
+# ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def add_knowledge(
+async def _db_add_knowledge(
+    pool: asyncpg.Pool,
     title: str,
     content: str,
-    project: str = "general",
-    category: str = "general",
+    project: str = "General",
+    category: str = "General",
     tags: list[str] | None = None,
     url: str | None = None,
-    ctx: Context = None,
-) -> str:
-    """Add a knowledge entry to the OpenBrain knowledge base.
-
-    Args:
-        title: Entry title
-        content: Entry content
-        project: Project name for provenance and initial link (default: "general")
-        category: Category (default: "general")
-        tags: Optional tags for filtering
-        url: Optional URL (e.g. repo link, docs page)
-    """
-    app = _get_app_ctx(ctx)
-    async with app.pool.acquire() as conn:
+) -> dict:
+    """Insert a knowledge entry and auto-link to project. Returns the row dict."""
+    async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """INSERT INTO knowledge (project, category, title, content, url, tags)
@@ -172,7 +172,530 @@ async def add_knowledge(
                    ON CONFLICT DO NOTHING""",
                 proj["id"], row["id"],
             )
-    return _format_rows([row])
+    return dict(row)
+
+
+async def _db_update_knowledge(pool: asyncpg.Pool, kid: int, **fields) -> dict | None:
+    """Partial update of a knowledge entry. Returns updated row or None."""
+    allowed = {"title", "content", "category", "url", "tags", "project"}
+    sets = []
+    params = []
+    idx = 1
+    for col, val in fields.items():
+        if col in allowed and val is not None:
+            sets.append(f"{col} = ${idx}")
+            params.append(val)
+            idx += 1
+    if not sets:
+        return None
+    sets.append("updated_at = NOW()")
+    params.append(kid)
+    query = f"""UPDATE knowledge SET {', '.join(sets)}
+                WHERE id = ${idx} AND status = 'active'
+                RETURNING id, project, category, title, url, tags, status, updated_at"""
+    row = await pool.fetchrow(query, *params)
+    return dict(row) if row else None
+
+
+async def _db_hard_delete_knowledge(pool: asyncpg.Pool, kid: int) -> dict | None:
+    """Hard-delete a knowledge entry (must be archived). Returns deleted row or None."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT id, title, status FROM knowledge WHERE id = $1", kid
+            )
+            if row is None:
+                return None
+            if row["status"] != "archived":
+                raise ValueError("Only archived knowledge can be deleted")
+            await conn.execute(
+                "DELETE FROM project_links WHERE knowledge_id = $1", kid
+            )
+            await conn.execute("DELETE FROM knowledge WHERE id = $1", kid)
+    return dict(row)
+
+
+async def _db_save_memory(
+    pool: asyncpg.Pool,
+    memory_type: str,
+    name: str,
+    content: str,
+    description: str | None = None,
+    project: str = "General",
+) -> dict:
+    """Insert a memory and auto-link to project. Returns the row dict."""
+    if memory_type not in VALID_MEMORY_TYPES:
+        raise ValueError(f"memory_type must be one of: {', '.join(sorted(VALID_MEMORY_TYPES))}")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """INSERT INTO memories (memory_type, name, content, description, project)
+                   VALUES ($1, $2, $3, $4, $5)
+                   RETURNING id, memory_type, name, created_at""",
+                memory_type, name, content, description, project,
+            )
+            proj = await conn.fetchrow(
+                "SELECT id FROM projects WHERE name = $1", project
+            )
+            if proj is None:
+                proj = await conn.fetchrow(
+                    """INSERT INTO projects (name, status)
+                       VALUES ($1, 'active') RETURNING id""",
+                    project,
+                )
+            await conn.execute(
+                """INSERT INTO project_links (project_id, memory_id, status)
+                   VALUES ($1, $2, 'active')
+                   ON CONFLICT DO NOTHING""",
+                proj["id"], row["id"],
+            )
+    return dict(row)
+
+
+async def _db_update_memory(pool: asyncpg.Pool, mid: int, **fields) -> dict | None:
+    """Partial update of a memory. Returns updated row or None."""
+    allowed = {"memory_type", "name", "content", "description", "project"}
+    sets = []
+    params = []
+    idx = 1
+    for col, val in fields.items():
+        if col in allowed and val is not None:
+            sets.append(f"{col} = ${idx}")
+            params.append(val)
+            idx += 1
+    if not sets:
+        return None
+    sets.append("updated_at = NOW()")
+    params.append(mid)
+    query = f"""UPDATE memories SET {', '.join(sets)}
+                WHERE id = ${idx} AND status = 'active'
+                RETURNING id, memory_type, name, description, content, project, status, updated_at"""
+    row = await pool.fetchrow(query, *params)
+    return dict(row) if row else None
+
+
+async def _db_hard_delete_memory(pool: asyncpg.Pool, mid: int) -> dict | None:
+    """Hard-delete a memory (must be archived). Returns deleted row or None."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT id, name, status FROM memories WHERE id = $1", mid
+            )
+            if row is None:
+                return None
+            if row["status"] != "archived":
+                raise ValueError("Only archived memories can be deleted")
+            await conn.execute(
+                "DELETE FROM project_links WHERE memory_id = $1", mid
+            )
+            await conn.execute("DELETE FROM memories WHERE id = $1", mid)
+    return dict(row)
+
+
+async def _db_hard_delete_project(pool: asyncpg.Pool, name: str) -> dict | None:
+    """Hard-delete a project (must be archived, cannot be 'general'). Returns deleted row or None."""
+    if name == "General":
+        raise ValueError("Cannot delete the 'general' project")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT id, name, status FROM projects WHERE name = $1", name
+            )
+            if row is None:
+                return None
+            if row["status"] != "archived":
+                raise ValueError("Only archived projects can be deleted")
+            await conn.execute(
+                "DELETE FROM project_links WHERE project_id = $1", row["id"]
+            )
+            await conn.execute("DELETE FROM projects WHERE id = $1", row["id"])
+    return dict(row)
+
+
+async def _db_archive(pool: asyncpg.Pool, entity_type: str, entity_id: int) -> dict | None:
+    """Archive a knowledge entry or memory. Returns the updated row or None."""
+    if entity_type == "knowledge":
+        table, id_col, ret_cols = "knowledge", "id", "id, title, status"
+        link_col = "knowledge_id"
+    elif entity_type == "memory":
+        table, id_col, ret_cols = "memories", "id", "id, name, status"
+        link_col = "memory_id"
+    else:
+        raise ValueError("entity_type must be 'knowledge' or 'memory'")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"""UPDATE {table} SET status = 'archived', updated_at = NOW()
+                    WHERE {id_col} = $1 AND status = 'active'
+                    RETURNING {ret_cols}""",
+                entity_id,
+            )
+            if row is None:
+                return None
+            await conn.execute(
+                f"""UPDATE project_links SET status = 'archived', archived_at = NOW()
+                    WHERE {link_col} = $1 AND status = 'active'""",
+                entity_id,
+            )
+    return dict(row)
+
+
+async def _db_unarchive(pool: asyncpg.Pool, entity_type: str, entity_id: int) -> dict | None:
+    """Unarchive a knowledge entry or memory. Returns the updated row or None."""
+    if entity_type == "knowledge":
+        table, ret_cols = "knowledge", "id, title, status"
+    elif entity_type == "memory":
+        table, ret_cols = "memories", "id, name, status"
+    else:
+        raise ValueError("entity_type must be 'knowledge' or 'memory'")
+
+    row = await pool.fetchrow(
+        f"""UPDATE {table} SET status = 'active', updated_at = NOW()
+            WHERE id = $1 AND status = 'archived'
+            RETURNING {ret_cols}""",
+        entity_id,
+    )
+    return dict(row) if row else None
+
+
+async def _db_link(
+    pool: asyncpg.Pool,
+    project_name: str,
+    knowledge_id: int | None = None,
+    memory_id: int | None = None,
+) -> dict | None:
+    """Link a knowledge entry or memory to a project. Returns the link row or None if already exists."""
+    if (knowledge_id is None) == (memory_id is None):
+        raise ValueError("Provide exactly one of knowledge_id or memory_id")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            proj = await conn.fetchrow(
+                "SELECT id FROM projects WHERE name = $1 AND status IN ('active', 'system')",
+                project_name,
+            )
+            if proj is None:
+                raise LookupError(f"Project '{project_name}' not found or not active")
+
+            if knowledge_id is not None:
+                exists = await conn.fetchval(
+                    "SELECT id FROM knowledge WHERE id = $1 AND status = 'active'",
+                    knowledge_id,
+                )
+                if exists is None:
+                    raise LookupError(f"Knowledge entry {knowledge_id} not found or not active")
+                row = await conn.fetchrow(
+                    """INSERT INTO project_links (project_id, knowledge_id, status)
+                       VALUES ($1, $2, 'active')
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, project_id, knowledge_id, status""",
+                    proj["id"], knowledge_id,
+                )
+            else:
+                exists = await conn.fetchval(
+                    "SELECT id FROM memories WHERE id = $1 AND status = 'active'",
+                    memory_id,
+                )
+                if exists is None:
+                    raise LookupError(f"Memory {memory_id} not found or not active")
+                row = await conn.fetchrow(
+                    """INSERT INTO project_links (project_id, memory_id, status)
+                       VALUES ($1, $2, 'active')
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, project_id, memory_id, status""",
+                    proj["id"], memory_id,
+                )
+    return dict(row) if row else None
+
+
+async def _db_unlink(
+    pool: asyncpg.Pool,
+    project_name: str,
+    knowledge_id: int | None = None,
+    memory_id: int | None = None,
+) -> dict | None:
+    """Unlink a knowledge entry or memory from a project. Returns the link row or None."""
+    if (knowledge_id is None) == (memory_id is None):
+        raise ValueError("Provide exactly one of knowledge_id or memory_id")
+
+    proj = await pool.fetchrow(
+        "SELECT id FROM projects WHERE name = $1", project_name
+    )
+    if proj is None:
+        raise LookupError(f"Project '{project_name}' not found")
+
+    if knowledge_id is not None:
+        row = await pool.fetchrow(
+            """UPDATE project_links SET status = 'archived', archived_at = NOW()
+               WHERE project_id = $1 AND knowledge_id = $2 AND status = 'active'
+               RETURNING id, project_id, knowledge_id, status""",
+            proj["id"], knowledge_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """UPDATE project_links SET status = 'archived', archived_at = NOW()
+               WHERE project_id = $1 AND memory_id = $2 AND status = 'active'
+               RETURNING id, project_id, memory_id, status""",
+            proj["id"], memory_id,
+        )
+    return dict(row) if row else None
+
+
+async def _db_search(
+    pool: asyncpg.Pool,
+    http: httpx.AsyncClient,
+    query: str,
+    mode: str = "all",
+    types: list[str] | None = None,
+) -> list[dict]:
+    """Search knowledge and/or memories. Returns list of dicts."""
+    search_types = types or ["knowledge", "memories"]
+    embedding = None
+    if mode != "exact":
+        embedding = await get_embedding(http, query)
+    results = []
+
+    if "knowledge" in search_types:
+        if embedding is not None:
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            rows = await pool.fetch(
+                """SELECT 'knowledge' AS type, k.id, k.title AS name, k.content,
+                          k.status, 1 - (k.embedding <=> $1::vector) AS similarity
+                   FROM knowledge k
+                   WHERE k.status = 'active' AND k.embedding IS NOT NULL
+                   ORDER BY k.embedding <=> $1::vector
+                   LIMIT 20""",
+                embedding_str,
+            )
+        else:
+            rows = await pool.fetch(
+                """SELECT 'knowledge' AS type, k.id, k.title AS name, k.content,
+                          k.status, 0.0 AS similarity
+                   FROM knowledge k
+                   WHERE k.status = 'active'
+                     AND (k.title ILIKE '%' || $1 || '%' OR k.content ILIKE '%' || $1 || '%')
+                   ORDER BY k.updated_at DESC
+                   LIMIT 20""",
+                query,
+            )
+        results.extend(dict(r) for r in rows)
+
+    if "memories" in search_types:
+        if embedding is not None:
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            rows = await pool.fetch(
+                """SELECT 'memory' AS type, m.id, m.name, m.content,
+                          m.status, 1 - (m.embedding <=> $1::vector) AS similarity
+                   FROM memories m
+                   WHERE m.status = 'active' AND m.embedding IS NOT NULL
+                   ORDER BY m.embedding <=> $1::vector
+                   LIMIT 20""",
+                embedding_str,
+            )
+        else:
+            rows = await pool.fetch(
+                """SELECT 'memory' AS type, m.id, m.name, m.content,
+                          m.status, 0.0 AS similarity
+                   FROM memories m
+                   WHERE m.status = 'active'
+                     AND (m.name ILIKE '%' || $1 || '%' OR m.content ILIKE '%' || $1 || '%')
+                   ORDER BY m.updated_at DESC
+                   LIMIT 20""",
+                query,
+            )
+        results.extend(dict(r) for r in rows)
+
+    return results
+
+
+async def _db_bulk_delete(pool: asyncpg.Pool, items: list[dict]) -> dict:
+    """Transactional bulk delete of archived items.
+    Each item: {"type": "knowledge"|"memory"|"project", "id": <int>|<str>}
+    Returns summary of deleted counts.
+    """
+    deleted = {"knowledge": 0, "memories": 0, "projects": 0}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for item in items:
+                item_type = item["type"]
+                item_id = item["id"]
+                if item_type == "knowledge":
+                    row = await conn.fetchrow(
+                        "SELECT status FROM knowledge WHERE id = $1", int(item_id)
+                    )
+                    if row is None or row["status"] != "archived":
+                        raise ValueError(f"Knowledge {item_id} not found or not archived")
+                    await conn.execute(
+                        "DELETE FROM project_links WHERE knowledge_id = $1", int(item_id)
+                    )
+                    await conn.execute("DELETE FROM knowledge WHERE id = $1", int(item_id))
+                    deleted["knowledge"] += 1
+                elif item_type == "memory":
+                    row = await conn.fetchrow(
+                        "SELECT status FROM memories WHERE id = $1", int(item_id)
+                    )
+                    if row is None or row["status"] != "archived":
+                        raise ValueError(f"Memory {item_id} not found or not archived")
+                    await conn.execute(
+                        "DELETE FROM project_links WHERE memory_id = $1", int(item_id)
+                    )
+                    await conn.execute("DELETE FROM memories WHERE id = $1", int(item_id))
+                    deleted["memories"] += 1
+                elif item_type == "project":
+                    name = str(item_id)
+                    if name == "General":
+                        raise ValueError("Cannot delete the 'general' project")
+                    row = await conn.fetchrow(
+                        "SELECT id, status FROM projects WHERE name = $1", name
+                    )
+                    if row is None or row["status"] != "archived":
+                        raise ValueError(f"Project '{name}' not found or not archived")
+                    await conn.execute(
+                        "DELETE FROM project_links WHERE project_id = $1", row["id"]
+                    )
+                    await conn.execute("DELETE FROM projects WHERE id = $1", row["id"])
+                    deleted["projects"] += 1
+                else:
+                    raise ValueError(f"Unknown type: {item_type}")
+    return deleted
+
+
+async def _db_archive_project(pool: asyncpg.Pool, name: str) -> dict:
+    """Archive a project with full orphan cascade logic.
+
+    Returns a result dict with archived_project, orphan_policy, and counts.
+    Raises ValueError if the project is not found, is a system project, or
+    is already archived.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            proj = await conn.fetchrow(
+                "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
+                name,
+            )
+            if proj is None:
+                raise ValueError(f"Project '{name}' not found")
+            if proj["status"] == "system":
+                raise ValueError(f"Cannot archive system project '{name}'")
+            if proj["status"] == "archived":
+                raise ValueError(f"Project '{name}' is already archived")
+
+            project_id = proj["id"]
+            policy = proj["orphan_policy"] or ORPHAN_POLICY
+
+            await conn.execute(
+                """UPDATE projects SET status = 'archived', updated_at = NOW()
+                   WHERE id = $1""",
+                project_id,
+            )
+
+            linked_knowledge = await conn.fetch(
+                """SELECT knowledge_id FROM project_links
+                   WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+            linked_memories = await conn.fetch(
+                """SELECT memory_id FROM project_links
+                   WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+
+            await conn.execute(
+                """UPDATE project_links SET status = 'archived', archived_at = NOW()
+                   WHERE project_id = $1 AND status = 'active'""",
+                project_id,
+            )
+
+            general_id = await conn.fetchval(
+                "SELECT id FROM projects WHERE name = 'General'"
+            )
+            orphaned_knowledge = []
+            orphaned_memories = []
+
+            for row in linked_knowledge:
+                kid = row["knowledge_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE knowledge_id = $1 AND status = 'active'""",
+                    kid,
+                )
+                if remaining == 0:
+                    orphaned_knowledge.append(kid)
+
+            for row in linked_memories:
+                mid = row["memory_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE memory_id = $1 AND status = 'active'""",
+                    mid,
+                )
+                if remaining == 0:
+                    orphaned_memories.append(mid)
+
+            if policy == "reassign":
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, knowledge_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, memory_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, mid,
+                    )
+            else:  # archive
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """UPDATE knowledge SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """UPDATE memories SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        mid,
+                    )
+
+    return {
+        "archived_project": name,
+        "orphan_policy": policy,
+        "orphaned_knowledge": len(orphaned_knowledge),
+        "orphaned_memories": len(orphaned_memories),
+    }
+
+
+# --- Knowledge tools ---
+
+
+@mcp.tool()
+async def add_knowledge(
+    title: str,
+    content: str,
+    project: str = "General",
+    category: str = "General",
+    tags: list[str] | None = None,
+    url: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Add a knowledge entry to the OpenBrain knowledge base.
+
+    Args:
+        title: Entry title
+        content: Entry content
+        project: Project name for provenance and initial link (default: "General")
+        category: Category (default: "General")
+        tags: Optional tags for filtering
+        url: Optional URL (e.g. repo link, docs page)
+    """
+    app = _get_app_ctx(ctx)
+    result = await _db_add_knowledge(app.pool, title, content, project, category, tags, url)
+    return json.dumps([result], default=str, indent=2)
 
 
 @mcp.tool()
@@ -462,7 +985,7 @@ async def save_memory(
     name: str,
     content: str,
     description: str | None = None,
-    project: str = "general",
+    project: str = "General",
     ctx: Context = None,
 ) -> str:
     """Store a persistent memory for future recall.
@@ -472,35 +995,16 @@ async def save_memory(
         name: Short name for the memory
         content: Memory content
         description: One-line description for relevance matching
-        project: Project name for provenance and initial link (default: "general")
+        project: Project name for provenance and initial link (default: "General")
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return json.dumps({"error": f"memory_type must be one of: {', '.join(sorted(VALID_MEMORY_TYPES))}"})
     app = _get_app_ctx(ctx)
-    async with app.pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """INSERT INTO memories (memory_type, name, content, description, project)
-                   VALUES ($1, $2, $3, $4, $5)
-                   RETURNING id, memory_type, name, created_at""",
-                memory_type, name, content, description, project,
-            )
-            proj = await conn.fetchrow(
-                "SELECT id FROM projects WHERE name = $1", project
-            )
-            if proj is None:
-                proj = await conn.fetchrow(
-                    """INSERT INTO projects (name, status)
-                       VALUES ($1, 'active') RETURNING id""",
-                    project,
-                )
-            await conn.execute(
-                """INSERT INTO project_links (project_id, memory_id, status)
-                   VALUES ($1, $2, 'active')
-                   ON CONFLICT DO NOTHING""",
-                proj["id"], row["id"],
-            )
-    return _format_rows([row])
+    try:
+        result = await _db_save_memory(app.pool, memory_type, name, content, description, project)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps([result], default=str, indent=2)
 
 
 @mcp.tool()
@@ -699,116 +1203,20 @@ async def archive_project(
 ) -> str:
     """Archive a project. Cascades to all its project links and handles orphans.
 
-    The system 'general' project cannot be archived.
+    The system 'General' project cannot be archived.
 
     Orphan policy (per-project setting overrides ORPHAN_POLICY env var):
     - "archive": orphaned entities are archived
-    - "reassign": orphaned entities are linked to the 'general' project
+    - "reassign": orphaned entities are linked to the 'General' project
 
     Args:
         name: Project name
     """
     app = _get_app_ctx(ctx)
-    async with app.pool.acquire() as conn:
-        async with conn.transaction():
-            proj = await conn.fetchrow(
-                "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
-                name,
-            )
-            if proj is None:
-                return json.dumps({"error": f"Project '{name}' not found"})
-            if proj["status"] == "system":
-                return json.dumps({"error": f"Cannot archive system project '{name}'"})
-            if proj["status"] == "archived":
-                return json.dumps({"error": f"Project '{name}' is already archived"})
-
-            project_id = proj["id"]
-            policy = proj["orphan_policy"] or ORPHAN_POLICY
-
-            await conn.execute(
-                """UPDATE projects SET status = 'archived', updated_at = NOW()
-                   WHERE id = $1""",
-                project_id,
-            )
-
-            linked_knowledge = await conn.fetch(
-                """SELECT knowledge_id FROM project_links
-                   WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
-                project_id,
-            )
-            linked_memories = await conn.fetch(
-                """SELECT memory_id FROM project_links
-                   WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
-                project_id,
-            )
-
-            await conn.execute(
-                """UPDATE project_links SET status = 'archived', archived_at = NOW()
-                   WHERE project_id = $1 AND status = 'active'""",
-                project_id,
-            )
-
-            general_id = await conn.fetchval(
-                "SELECT id FROM projects WHERE name = 'general'"
-            )
-            orphaned_knowledge = []
-            orphaned_memories = []
-
-            for row in linked_knowledge:
-                kid = row["knowledge_id"]
-                remaining = await conn.fetchval(
-                    """SELECT COUNT(*) FROM project_links
-                       WHERE knowledge_id = $1 AND status = 'active'""",
-                    kid,
-                )
-                if remaining == 0:
-                    orphaned_knowledge.append(kid)
-
-            for row in linked_memories:
-                mid = row["memory_id"]
-                remaining = await conn.fetchval(
-                    """SELECT COUNT(*) FROM project_links
-                       WHERE memory_id = $1 AND status = 'active'""",
-                    mid,
-                )
-                if remaining == 0:
-                    orphaned_memories.append(mid)
-
-            if policy == "reassign":
-                for kid in orphaned_knowledge:
-                    await conn.execute(
-                        """INSERT INTO project_links (project_id, knowledge_id, status)
-                           VALUES ($1, $2, 'active')
-                           ON CONFLICT DO NOTHING""",
-                        general_id, kid,
-                    )
-                for mid in orphaned_memories:
-                    await conn.execute(
-                        """INSERT INTO project_links (project_id, memory_id, status)
-                           VALUES ($1, $2, 'active')
-                           ON CONFLICT DO NOTHING""",
-                        general_id, mid,
-                    )
-            else:  # archive
-                for kid in orphaned_knowledge:
-                    await conn.execute(
-                        """UPDATE knowledge SET status = 'archived', updated_at = NOW()
-                           WHERE id = $1""",
-                        kid,
-                    )
-                for mid in orphaned_memories:
-                    await conn.execute(
-                        """UPDATE memories SET status = 'archived', updated_at = NOW()
-                           WHERE id = $1""",
-                        mid,
-                    )
-
-    result = {
-        "archived_project": name,
-        "orphan_policy": policy,
-        "orphaned_knowledge": len(orphaned_knowledge),
-        "orphaned_memories": len(orphaned_memories),
-    }
+    try:
+        result = await _db_archive_project(app.pool, name)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
     return json.dumps(result, indent=2)
 
 
@@ -990,9 +1398,417 @@ async def unlink_from_project(
     return _format_rows([row])
 
 
+# ---------------------------------------------------------------------------
+# REST API endpoints (Starlette)
+# ---------------------------------------------------------------------------
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+_rest_app_ctx: AppContext | None = None
+
+
+def _get_pool() -> asyncpg.Pool:
+    assert _rest_app_ctx is not None, "REST app not initialized"
+    return _rest_app_ctx.pool
+
+
+def _get_http() -> httpx.AsyncClient:
+    assert _rest_app_ctx is not None, "REST app not initialized"
+    return _rest_app_ctx.http
+
+
+def _json(data, status_code: int = 200) -> JSONResponse:
+    import json as _json_mod
+    body = _json_mod.loads(_json_mod.dumps(data, default=str))
+    return JSONResponse(body, status_code=status_code)
+
+
+def _err(message: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+# --- Knowledge REST ---
+
+
+async def rest_knowledge_create(request: Request) -> JSONResponse:
+    body = await request.json()
+    title = body.get("title")
+    content = body.get("content")
+    if not title or not content:
+        return _err("title and content are required", 400)
+    try:
+        result = await _db_add_knowledge(
+            _get_pool(),
+            title=title,
+            content=content,
+            project=body.get("project", "General"),
+            category=body.get("category", "General"),
+            tags=body.get("tags"),
+            url=body.get("url"),
+        )
+        return _json(result, 201)
+    except asyncpg.UniqueViolationError:
+        return _err("Duplicate knowledge entry", 409)
+
+
+async def rest_knowledge_update(request: Request) -> JSONResponse:
+    kid = int(request.path_params["id"])
+    body = await request.json()
+    fields = {k: v for k, v in body.items() if k in {"title", "content", "category", "url", "tags", "project"}}
+    if not fields:
+        return _err("No valid fields to update", 400)
+    result = await _db_update_knowledge(_get_pool(), kid, **fields)
+    if result is None:
+        return _err(f"Knowledge entry {kid} not found or not active", 404)
+    return _json(result)
+
+
+async def rest_knowledge_delete(request: Request) -> JSONResponse:
+    kid = int(request.path_params["id"])
+    try:
+        result = await _db_hard_delete_knowledge(_get_pool(), kid)
+    except ValueError as e:
+        return _err(str(e), 400)
+    if result is None:
+        return _err(f"Knowledge entry {kid} not found", 404)
+    return _json({"deleted": result})
+
+
+# --- Memories REST ---
+
+
+async def rest_memories_create(request: Request) -> JSONResponse:
+    body = await request.json()
+    memory_type = body.get("memory_type")
+    name = body.get("name")
+    content = body.get("content")
+    if not memory_type or not name or not content:
+        return _err("memory_type, name, and content are required", 400)
+    try:
+        result = await _db_save_memory(
+            _get_pool(),
+            memory_type=memory_type,
+            name=name,
+            content=content,
+            description=body.get("description"),
+            project=body.get("project", "General"),
+        )
+        return _json(result, 201)
+    except ValueError as e:
+        return _err(str(e), 400)
+    except asyncpg.UniqueViolationError:
+        return _err("Duplicate memory entry", 409)
+
+
+async def rest_memories_update(request: Request) -> JSONResponse:
+    mid = int(request.path_params["id"])
+    body = await request.json()
+    fields = {k: v for k, v in body.items() if k in {"memory_type", "name", "content", "description", "project"}}
+    if not fields:
+        return _err("No valid fields to update", 400)
+    result = await _db_update_memory(_get_pool(), mid, **fields)
+    if result is None:
+        return _err(f"Memory {mid} not found or not active", 404)
+    return _json(result)
+
+
+async def rest_memories_delete(request: Request) -> JSONResponse:
+    mid = int(request.path_params["id"])
+    try:
+        result = await _db_hard_delete_memory(_get_pool(), mid)
+    except ValueError as e:
+        return _err(str(e), 400)
+    if result is None:
+        return _err(f"Memory {mid} not found", 404)
+    return _json({"deleted": result})
+
+
+# --- Projects REST ---
+
+
+async def rest_projects_create(request: Request) -> JSONResponse:
+    body = await request.json()
+    name = body.get("name")
+    if not name:
+        return _err("name is required", 400)
+    orphan_policy = body.get("orphan_policy")
+    if orphan_policy is not None and orphan_policy not in ("archive", "reassign"):
+        return _err("orphan_policy must be 'archive' or 'reassign'", 400)
+    try:
+        row = await _get_pool().fetchrow(
+            """INSERT INTO projects (name, description, repo_url, tech_stack, notes, orphan_policy)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               RETURNING id, name, status, orphan_policy, created_at""",
+            name,
+            body.get("description"),
+            body.get("repo_url"),
+            body.get("tech_stack", []),
+            body.get("notes"),
+            orphan_policy,
+        )
+        return _json(dict(row), 201)
+    except asyncpg.UniqueViolationError:
+        return _err(f"Project '{name}' already exists", 409)
+
+
+async def rest_projects_update(request: Request) -> JSONResponse:
+    name = request.path_params["name"]
+    body = await request.json()
+    orphan_policy = body.get("orphan_policy")
+    if orphan_policy is not None and orphan_policy not in ("archive", "reassign"):
+        return _err("orphan_policy must be 'archive' or 'reassign'", 400)
+    sets = []
+    params = []
+    idx = 1
+    for col, val in [
+        ("description", body.get("description")),
+        ("repo_url", body.get("repo_url")),
+        ("tech_stack", body.get("tech_stack")),
+        ("notes", body.get("notes")),
+        ("orphan_policy", orphan_policy),
+    ]:
+        if val is not None:
+            sets.append(f"{col} = ${idx}")
+            params.append(val)
+            idx += 1
+    if not sets:
+        return _err("No fields to update", 400)
+    sets.append("updated_at = NOW()")
+    params.append(name)
+    query = f"""UPDATE projects SET {', '.join(sets)}
+                WHERE name = ${idx}
+                RETURNING id, name, description, repo_url, tech_stack, notes,
+                          status, orphan_policy, updated_at"""
+    row = await _get_pool().fetchrow(query, *params)
+    if row is None:
+        return _err(f"Project '{name}' not found", 404)
+    return _json(dict(row))
+
+
+async def rest_projects_delete(request: Request) -> JSONResponse:
+    name = request.path_params["name"]
+    try:
+        result = await _db_hard_delete_project(_get_pool(), name)
+    except ValueError as e:
+        return _err(str(e), 400)
+    if result is None:
+        return _err(f"Project '{name}' not found", 404)
+    return _json({"deleted": result})
+
+
+# --- Archive / Unarchive REST ---
+
+
+async def rest_archive(request: Request) -> JSONResponse:
+    entity_type = request.path_params["type"]
+    entity_id = request.path_params["id"]
+
+    if entity_type == "project":
+        # Full project archive with orphan handling (delegates to shared helper)
+        try:
+            result = await _db_archive_project(_get_pool(), entity_id)
+        except ValueError as e:
+            msg = str(e)
+            status = 404 if "not found" in msg else 400
+            return _err(msg, status)
+        return _json(result)
+
+    # knowledge or memory
+    if entity_type not in ("knowledge", "memory"):
+        return _err("type must be 'knowledge', 'memory', or 'project'", 400)
+    try:
+        result = await _db_archive(_get_pool(), entity_type, int(entity_id))
+    except ValueError as e:
+        return _err(str(e), 400)
+    if result is None:
+        return _err(f"{entity_type} {entity_id} not found or already archived", 404)
+    return _json(result)
+
+
+async def rest_unarchive(request: Request) -> JSONResponse:
+    entity_type = request.path_params["type"]
+    entity_id = request.path_params["id"]
+
+    if entity_type == "project":
+        row = await _get_pool().fetchrow(
+            """UPDATE projects SET status = 'active', updated_at = NOW()
+               WHERE name = $1 AND status = 'archived'
+               RETURNING id, name, status""",
+            entity_id,
+        )
+        if row is None:
+            return _err(f"Project '{entity_id}' not found or not archived", 404)
+        return _json(dict(row))
+
+    if entity_type not in ("knowledge", "memory"):
+        return _err("type must be 'knowledge', 'memory', or 'project'", 400)
+    try:
+        result = await _db_unarchive(_get_pool(), entity_type, int(entity_id))
+    except ValueError as e:
+        return _err(str(e), 400)
+    if result is None:
+        return _err(f"{entity_type} {entity_id} not found or not archived", 404)
+    return _json(result)
+
+
+# --- Link REST ---
+
+
+async def rest_link(request: Request) -> JSONResponse:
+    body = await request.json()
+    project_name = body.get("project")
+    knowledge_id = body.get("knowledge_id")
+    memory_id = body.get("memory_id")
+    if not project_name:
+        return _err("project is required", 400)
+    try:
+        result = await _db_link(
+            _get_pool(),
+            project_name=project_name,
+            knowledge_id=int(knowledge_id) if knowledge_id is not None else None,
+            memory_id=int(memory_id) if memory_id is not None else None,
+        )
+    except ValueError as e:
+        return _err(str(e), 400)
+    except LookupError as e:
+        return _err(str(e), 404)
+    if result is None:
+        return _json({"message": "Link already exists"}, 200)
+    return _json(result, 201)
+
+
+async def rest_unlink(request: Request) -> JSONResponse:
+    body = await request.json()
+    project_name = body.get("project")
+    knowledge_id = body.get("knowledge_id")
+    memory_id = body.get("memory_id")
+    if not project_name:
+        return _err("project is required", 400)
+    try:
+        result = await _db_unlink(
+            _get_pool(),
+            project_name=project_name,
+            knowledge_id=int(knowledge_id) if knowledge_id is not None else None,
+            memory_id=int(memory_id) if memory_id is not None else None,
+        )
+    except ValueError as e:
+        return _err(str(e), 400)
+    except LookupError as e:
+        return _err(str(e), 404)
+    if result is None:
+        return _err("Active link not found", 404)
+    return _json(result)
+
+
+# --- Search REST ---
+
+
+async def rest_search(request: Request) -> JSONResponse:
+    body = await request.json()
+    query = body.get("query")
+    if not query:
+        return _err("query is required", 400)
+    results = await _db_search(
+        _get_pool(),
+        _get_http(),
+        query=query,
+        mode=body.get("mode", "all"),
+        types=body.get("types"),
+    )
+    return _json(results)
+
+
+# --- Bulk delete REST ---
+
+
+async def rest_bulk_delete(request: Request) -> JSONResponse:
+    body = await request.json()
+    items = body.get("items")
+    if not items or not isinstance(items, list):
+        return _err("items array is required", 400)
+    try:
+        result = await _db_bulk_delete(_get_pool(), items)
+    except ValueError as e:
+        return _err(str(e), 400)
+    return _json(result)
+
+
+# ---------------------------------------------------------------------------
+# Combined ASGI app: REST + MCP
+# ---------------------------------------------------------------------------
+
+rest_routes = [
+    Route("/api/knowledge", rest_knowledge_create, methods=["POST"]),
+    Route("/api/knowledge/{id:int}", rest_knowledge_update, methods=["PUT"]),
+    Route("/api/knowledge/{id:int}", rest_knowledge_delete, methods=["DELETE"]),
+    Route("/api/memories", rest_memories_create, methods=["POST"]),
+    Route("/api/memories/{id:int}", rest_memories_update, methods=["PUT"]),
+    Route("/api/memories/{id:int}", rest_memories_delete, methods=["DELETE"]),
+    Route("/api/projects", rest_projects_create, methods=["POST"]),
+    Route("/api/projects/{name:str}", rest_projects_update, methods=["PUT"]),
+    Route("/api/projects/{name:str}", rest_projects_delete, methods=["DELETE"]),
+    Route("/api/archive/{type:str}/{id:str}", rest_archive, methods=["POST"]),
+    Route("/api/unarchive/{type:str}/{id:str}", rest_unarchive, methods=["POST"]),
+    Route("/api/link", rest_link, methods=["POST"]),
+    Route("/api/link", rest_unlink, methods=["DELETE"]),
+    Route("/api/search", rest_search, methods=["POST"]),
+    Route("/api/bulk-delete", rest_bulk_delete, methods=["DELETE"]),
+]
+
+
+@asynccontextmanager
+async def _rest_lifespan(app):
+    global _rest_app_ctx
+    pool = await asyncpg.create_pool(
+        host=DB_HOST, port=DB_PORT, database=DB_NAME,
+        user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
+    )
+    http = httpx.AsyncClient()
+    _rest_app_ctx = AppContext(pool=pool, http=http)
+    try:
+        yield
+    finally:
+        await http.aclose()
+        await pool.close()
+
+
+# Build the MCP ASGI app (handles /mcp path)
+mcp_asgi = mcp.streamable_http_app()
+
+
+async def _combined_app(scope, receive, send):
+    """Route requests: /api/* -> REST app, /mcp* -> MCP app."""
+    path = scope.get("path", "")
+    if scope["type"] == "lifespan":
+        await rest_app(scope, receive, send)
+        return
+    if path.startswith("/api"):
+        await rest_app(scope, receive, send)
+    else:
+        await mcp_asgi(scope, receive, send)
+
+
+rest_app = Starlette(
+    routes=rest_routes,
+    lifespan=_rest_lifespan,
+)
+
+app = _combined_app
+
+
 if __name__ == "__main__":
     import asyncio
+    import uvicorn
+
     print("[startup] Applying database schema...", flush=True)
     asyncio.run(_apply_schema())
-    print("[startup] Starting MCP server...", flush=True)
-    mcp.run(transport="streamable-http")
+    print("[startup] Starting combined MCP + REST server...", flush=True)
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=3001,
+        log_level="info",
+    )

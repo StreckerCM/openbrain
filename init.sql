@@ -4,8 +4,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Project knowledge base table
 CREATE TABLE IF NOT EXISTS knowledge (
     id SERIAL PRIMARY KEY,
-    project TEXT NOT NULL DEFAULT 'general',
-    category TEXT NOT NULL DEFAULT 'general',
+    project TEXT NOT NULL DEFAULT 'General',
+    category TEXT NOT NULL DEFAULT 'General',
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     url TEXT,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS memories (
     name TEXT NOT NULL,
     description TEXT,
     content TEXT NOT NULL,
-    project TEXT DEFAULT 'general',
+    project TEXT DEFAULT 'General',
     status TEXT NOT NULL DEFAULT 'active',
     embedding vector(1536),
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -85,9 +85,9 @@ CREATE INDEX IF NOT EXISTS project_links_knowledge_idx ON project_links (knowled
 CREATE INDEX IF NOT EXISTS project_links_memory_idx ON project_links (memory_id) WHERE memory_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS project_links_status_idx ON project_links (status);
 
--- Seed the default 'general' project
+-- Seed the default 'General' project
 INSERT INTO projects (name, description, status)
-VALUES ('general', 'Default project for non-project-specific knowledge and memories', 'system')
+VALUES ('General', 'Default project for non-project-specific knowledge and memories', 'system')
 ON CONFLICT (name) DO NOTHING;
 
 -- Status and URL indexes
@@ -190,3 +190,44 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- View: knowledge items with their associated project names
+CREATE OR REPLACE VIEW knowledge_with_projects AS
+SELECT k.*,
+       COALESCE(array_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL), '{}') AS projects
+FROM knowledge k
+LEFT JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
+LEFT JOIN projects p ON p.id = pl.project_id
+GROUP BY k.id;
+
+-- View: memory items with their associated project names
+CREATE OR REPLACE VIEW memories_with_projects AS
+SELECT m.*,
+       COALESCE(array_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL), '{}') AS projects
+FROM memories m
+LEFT JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
+LEFT JOIN projects p ON p.id = pl.project_id
+GROUP BY m.id;
+
+-- View: recent activity across knowledge and memories
+CREATE OR REPLACE VIEW recent_activity AS
+SELECT id, 'knowledge' AS type, title AS name, category AS subtype, updated_at
+FROM knowledge WHERE status = 'active'
+UNION ALL
+SELECT id, 'memory' AS type, name, memory_type AS subtype, updated_at
+FROM memories WHERE status = 'active';
+
+-- Function: return active knowledge and memories not linked to any active project
+CREATE OR REPLACE FUNCTION orphaned_items()
+RETURNS TABLE(id INT, type TEXT, name TEXT, updated_at TIMESTAMPTZ) AS $$
+  SELECT k.id, 'knowledge', k.title, k.updated_at
+  FROM knowledge k
+  LEFT JOIN project_links pl ON pl.knowledge_id = k.id AND pl.status = 'active'
+  WHERE k.status = 'active' AND pl.id IS NULL
+  UNION ALL
+  SELECT m.id, 'memory', m.name, m.updated_at
+  FROM memories m
+  LEFT JOIN project_links pl ON pl.memory_id = m.id AND pl.status = 'active'
+  WHERE m.status = 'active' AND pl.id IS NULL
+  ORDER BY updated_at DESC;
+$$ LANGUAGE sql STABLE;

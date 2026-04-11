@@ -3,6 +3,20 @@ import time
 import psycopg2
 from openai import OpenAI
 
+try:
+    import sentry_sdk
+    SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+    if SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=0.1,
+            environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+            release=os.environ.get("SENTRY_RELEASE", "openbrain@0.1.0"),
+        )
+        sentry_sdk.set_tag("service", "embedder")
+except ImportError:
+    pass
+
 DB_HOST = os.environ.get("DB_HOST", "db")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 DB_NAME = os.environ.get("DB_NAME", "openbrain")

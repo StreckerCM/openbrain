@@ -54,12 +54,16 @@ CREATE INDEX IF NOT EXISTS project_links_memory_idx ON project_links (memory_id)
 CREATE INDEX IF NOT EXISTS project_links_status_idx ON project_links (status);
 
 -- ----------------------------------------------------------
--- Step 3: Seed the 'general' system project
+-- Step 3: Rename 'general' to 'General' and seed system project
 -- ----------------------------------------------------------
 
+UPDATE projects SET name = 'General' WHERE name = 'general';
+UPDATE knowledge SET project = 'General' WHERE project = 'general';
+UPDATE memories SET project = 'General' WHERE project = 'general';
+
 INSERT INTO projects (name, description, status)
-VALUES ('general', 'Default project for non-project-specific knowledge and memories', 'system')
-ON CONFLICT (name) DO NOTHING;
+VALUES ('General', 'Default project for non-project-specific knowledge and memories', 'system')
+ON CONFLICT (name) DO UPDATE SET status = 'system';
 
 -- ----------------------------------------------------------
 -- Step 4: Backfill project_links from knowledge.project
@@ -86,14 +90,14 @@ INSERT INTO project_links (project_id, knowledge_id, status)
 SELECT p.id, k.id, 'active'
 FROM knowledge k
 CROSS JOIN projects p
-WHERE p.name = 'general'
+WHERE p.name = 'General'
   AND (k.project IS NULL OR k.project = '')
   AND NOT EXISTS (
       SELECT 1 FROM project_links pl
       WHERE pl.project_id = p.id AND pl.knowledge_id = k.id
   );
 
-UPDATE knowledge SET project = 'general' WHERE project IS NULL OR project = '';
+UPDATE knowledge SET project = 'General' WHERE project IS NULL OR project = '';
 
 -- ----------------------------------------------------------
 -- Step 5: Backfill project_links from memories.project
@@ -120,14 +124,14 @@ INSERT INTO project_links (project_id, memory_id, status)
 SELECT p.id, m.id, 'active'
 FROM memories m
 CROSS JOIN projects p
-WHERE p.name = 'general'
+WHERE p.name = 'General'
   AND (m.project IS NULL OR m.project = '')
   AND NOT EXISTS (
       SELECT 1 FROM project_links pl
       WHERE pl.project_id = p.id AND pl.memory_id = m.id
   );
 
-UPDATE memories SET project = 'general' WHERE project IS NULL OR project = '';
+UPDATE memories SET project = 'General' WHERE project IS NULL OR project = '';
 
 -- ----------------------------------------------------------
 -- Step 6: Migrate shared_resources → knowledge + project_links
@@ -159,7 +163,7 @@ BEGIN
 
         IF new_knowledge_id IS NULL THEN
             INSERT INTO knowledge (project, category, title, content, url, status)
-            VALUES ('general', sr.resource_type, sr.name, content_text, sr.url, 'active')
+            VALUES ('General', sr.resource_type, sr.name, content_text, sr.url, 'active')
             RETURNING id INTO new_knowledge_id;
         END IF;
 
@@ -176,7 +180,7 @@ BEGIN
                 ON CONFLICT DO NOTHING;
             END LOOP;
         ELSE
-            SELECT p.id INTO proj_id FROM projects p WHERE p.name = 'general';
+            SELECT p.id INTO proj_id FROM projects p WHERE p.name = 'General';
             INSERT INTO project_links (project_id, knowledge_id, status)
             VALUES (proj_id, new_knowledge_id, 'active')
             ON CONFLICT DO NOTHING;
