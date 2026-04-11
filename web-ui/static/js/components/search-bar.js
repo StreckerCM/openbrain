@@ -35,16 +35,16 @@ export function SearchBar({ onSearch, initialQuery = '' }) {
     return html`
         <form onSubmit=${handleSubmit}>
             <div class="filter-bar" style="flex-direction:column; align-items:stretch;">
-                <div class="flex gap-8" style="align-items:center;">
+                <div class="search-input-row">
                     <input
                         class="filter-input"
                         type="text"
                         placeholder="Search..."
                         value=${query}
                         onInput=${e => setQuery(e.target.value)}
-                        style="flex:1;"
+                        style="flex:1; min-width:0;"
                     />
-                    <button type="submit" class="btn btn-primary">Search</button>
+                    <button type="submit" class="btn btn-primary" style="white-space:nowrap;">Search</button>
                 </div>
 
                 <div class="flex gap-8 flex-wrap" style="align-items:center; margin-top:8px;">
