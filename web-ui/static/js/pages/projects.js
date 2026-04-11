@@ -60,9 +60,9 @@ function ProjectList() {
                         class="card project-card"
                         onClick=${() => navigate('#/projects/' + encodeURIComponent(p.name))}
                     >
-                        <div class="project-card-header">
-                            <span class="project-card-name">${p.name}</span>
-                            <span class=${'badge badge-' + (p.status === 'system' ? 'blue' : 'green')}>
+                        <div class="flex justify-between items-center" style="margin-bottom:8px;">
+                            <span style="font-size:16px;font-weight:600;color:var(--text-1);">${p.name}</span>
+                            <span class=${'badge badge-' + (p.status === 'system' ? 'system' : 'active')}>
                                 ${p.status}
                             </span>
                         </div>
