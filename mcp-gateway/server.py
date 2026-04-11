@@ -146,8 +146,8 @@ async def _db_add_knowledge(
     pool: asyncpg.Pool,
     title: str,
     content: str,
-    project: str = "general",
-    category: str = "general",
+    project: str = "General",
+    category: str = "General",
     tags: list[str] | None = None,
     url: str | None = None,
 ) -> dict:
@@ -224,7 +224,7 @@ async def _db_save_memory(
     name: str,
     content: str,
     description: str | None = None,
-    project: str = "general",
+    project: str = "General",
 ) -> dict:
     """Insert a memory and auto-link to project. Returns the row dict."""
     if memory_type not in VALID_MEMORY_TYPES:
@@ -297,7 +297,7 @@ async def _db_hard_delete_memory(pool: asyncpg.Pool, mid: int) -> dict | None:
 
 async def _db_hard_delete_project(pool: asyncpg.Pool, name: str) -> dict | None:
     """Hard-delete a project (must be archived, cannot be 'general'). Returns deleted row or None."""
-    if name == "general":
+    if name == "General":
         raise ValueError("Cannot delete the 'general' project")
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -545,7 +545,7 @@ async def _db_bulk_delete(pool: asyncpg.Pool, items: list[dict]) -> dict:
                     deleted["memories"] += 1
                 elif item_type == "project":
                     name = str(item_id)
-                    if name == "general":
+                    if name == "General":
                         raise ValueError("Cannot delete the 'general' project")
                     row = await conn.fetchrow(
                         "SELECT id, status FROM projects WHERE name = $1", name
@@ -569,8 +569,8 @@ async def _db_bulk_delete(pool: asyncpg.Pool, items: list[dict]) -> dict:
 async def add_knowledge(
     title: str,
     content: str,
-    project: str = "general",
-    category: str = "general",
+    project: str = "General",
+    category: str = "General",
     tags: list[str] | None = None,
     url: str | None = None,
     ctx: Context = None,
@@ -580,8 +580,8 @@ async def add_knowledge(
     Args:
         title: Entry title
         content: Entry content
-        project: Project name for provenance and initial link (default: "general")
-        category: Category (default: "general")
+        project: Project name for provenance and initial link (default: "General")
+        category: Category (default: "General")
         tags: Optional tags for filtering
         url: Optional URL (e.g. repo link, docs page)
     """
@@ -877,7 +877,7 @@ async def save_memory(
     name: str,
     content: str,
     description: str | None = None,
-    project: str = "general",
+    project: str = "General",
     ctx: Context = None,
 ) -> str:
     """Store a persistent memory for future recall.
@@ -887,7 +887,7 @@ async def save_memory(
         name: Short name for the memory
         content: Memory content
         description: One-line description for relevance matching
-        project: Project name for provenance and initial link (default: "general")
+        project: Project name for provenance and initial link (default: "General")
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return json.dumps({"error": f"memory_type must be one of: {', '.join(sorted(VALID_MEMORY_TYPES))}"})
@@ -1433,8 +1433,8 @@ async def rest_knowledge_create(request: Request) -> JSONResponse:
             _get_pool(),
             title=title,
             content=content,
-            project=body.get("project", "general"),
-            category=body.get("category", "general"),
+            project=body.get("project", "General"),
+            category=body.get("category", "General"),
             tags=body.get("tags"),
             url=body.get("url"),
         )
@@ -1483,7 +1483,7 @@ async def rest_memories_create(request: Request) -> JSONResponse:
             name=name,
             content=content,
             description=body.get("description"),
-            project=body.get("project", "general"),
+            project=body.get("project", "General"),
         )
         return _json(result, 201)
     except ValueError as e:

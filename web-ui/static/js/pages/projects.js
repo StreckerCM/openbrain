@@ -26,8 +26,8 @@ function ProjectList() {
                     const arr = Array.isArray(data) ? data : [];
                     // Ensure "general" project is first
                     arr.sort((a, b) => {
-                        if (a.name === 'general') return -1;
-                        if (b.name === 'general') return 1;
+                        if (a.name === 'General') return -1;
+                        if (b.name === 'General') return 1;
                         return a.name.localeCompare(b.name);
                     });
                     setProjects(arr);
@@ -60,8 +60,8 @@ function ProjectList() {
                         class="card project-card"
                         onClick=${() => navigate('#/projects/' + encodeURIComponent(p.name))}
                     >
-                        <div class="flex justify-between items-center" style="margin-bottom:8px;">
-                            <span style="font-size:16px;font-weight:600;color:var(--text-1);">${p.name}</span>
+                        <div style="margin-bottom:12px;">
+                            <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:4px;">${p.name}</div>
                             <span class=${'badge badge-' + (p.status === 'system' ? 'system' : 'active')}>
                                 ${p.status}
                             </span>
@@ -103,7 +103,7 @@ function ProjectDetail({ name }) {
     const [tabLoading, setTabLoading] = useState(false);
 
     const decodedName = decodeURIComponent(name);
-    const isGeneral = decodedName === 'general';
+    const isGeneral = decodedName === 'General';
 
     useEffect(() => {
         let cancelled = false;

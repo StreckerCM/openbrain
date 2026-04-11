@@ -238,7 +238,7 @@ function MemoryForm({ id }) {
         memory_type: 'user',
         name: '',
         description: '',
-        projects: ['general'],
+        projects: ['General'],
         content: '',
     });
     const [loading, setLoading] = useState(isEdit);

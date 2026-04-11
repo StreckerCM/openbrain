@@ -236,7 +236,7 @@ function KnowledgeForm({ id }) {
         title: '',
         category: 'general',
         url: '',
-        projects: ['general'],
+        projects: ['General'],
         tags: '',
         content: '',
     });

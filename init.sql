@@ -4,8 +4,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Project knowledge base table
 CREATE TABLE IF NOT EXISTS knowledge (
     id SERIAL PRIMARY KEY,
-    project TEXT NOT NULL DEFAULT 'general',
-    category TEXT NOT NULL DEFAULT 'general',
+    project TEXT NOT NULL DEFAULT 'General',
+    category TEXT NOT NULL DEFAULT 'General',
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     url TEXT,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS memories (
     name TEXT NOT NULL,
     description TEXT,
     content TEXT NOT NULL,
-    project TEXT DEFAULT 'general',
+    project TEXT DEFAULT 'General',
     status TEXT NOT NULL DEFAULT 'active',
     embedding vector(1536),
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -85,9 +85,9 @@ CREATE INDEX IF NOT EXISTS project_links_knowledge_idx ON project_links (knowled
 CREATE INDEX IF NOT EXISTS project_links_memory_idx ON project_links (memory_id) WHERE memory_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS project_links_status_idx ON project_links (status);
 
--- Seed the default 'general' project
+-- Seed the default 'General' project
 INSERT INTO projects (name, description, status)
-VALUES ('general', 'Default project for non-project-specific knowledge and memories', 'system')
+VALUES ('General', 'Default project for non-project-specific knowledge and memories', 'system')
 ON CONFLICT (name) DO NOTHING;
 
 -- Status and URL indexes
