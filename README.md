@@ -56,13 +56,14 @@ PGRST_JWT_SECRET=<output of: openssl rand -hex 32>
 docker compose up -d --build
 ```
 
-This launches six services:
+This launches seven services:
 
 | Service | Port | Description |
 |---------|------|-------------|
 | **db** | 5433 | PostgreSQL 17 with pgvector extension |
-| **mcp-gateway** | 3007 | Python FastMCP server — Streamable HTTP MCP endpoint |
-| **postgrest** | 3006 | REST API over the database |
+| **mcp-gateway** | 3007 | Python FastMCP server — MCP endpoint + REST API for web UI |
+| **web-ui** | 3010 | Dashboard SPA — browse, search, create, edit, archive, delete |
+| **postgrest** | 3006 | REST API over the database (read layer for web UI) |
 | **embedder** | — | Background service that generates vector embeddings every 30s |
 | **adminer** | 3008 | Web-based database browser |
 | **docs** | — | Nginx serving the docs directory |
@@ -278,6 +279,22 @@ Associates knowledge entries and memories with projects. Enables many-to-many re
 | `archived_at` | timestamptz | Set when link is archived |
 
 Exactly one of `knowledge_id` or `memory_id` must be non-null per row.
+
+## Web UI Dashboard
+
+The **web-ui** service at port `3010` provides a full management dashboard for the knowledge base. Open `http://localhost:3010` in a browser after starting the stack.
+
+**Features:**
+- Browse, search, create, edit, and archive knowledge entries, memories, and projects
+- Semantic search (OpenAI embeddings) with text search fallback
+- Project link management (link/unlink entities across projects)
+- Dashboard with stats, recent activity, and orphan alerts
+- Archive view with bulk restore and permanent delete
+- Dark theme, responsive sidebar with mobile hamburger menu
+
+**Tech stack:** Preact + HTM (no build step), marked.js for markdown rendering, Nginx reverse proxy. Reads go through PostgREST, writes through mcp-gateway REST endpoints.
+
+**Sentry error tracking (optional):** Set `SENTRY_DSN` in your `.env` file to enable error tracking across mcp-gateway, embedder, and the web UI frontend.
 
 ## Network Access
 
