@@ -68,49 +68,59 @@ export function readCount(table, filter = 'status=eq.active') {
 }
 
 export async function fetchCounts() {
-    const headers = { 'Prefer': 'count=exact' };
-    const opts = { headers };
-    const [kResp, mResp, pResp] = await Promise.all([
-        fetch(`${READ_BASE}/knowledge?status=eq.active&select=id&limit=0`, opts),
-        fetch(`${READ_BASE}/memories?status=eq.active&select=id&limit=0`, opts),
-        fetch(`${READ_BASE}/projects?status=in.(active,system)&select=id&limit=0`, opts),
-    ]);
-    const parseCount = (resp) => {
-        const range = resp.headers.get('Content-Range');
-        if (range) {
-            const match = range.match(/\/(\d+)/);
-            return match ? parseInt(match[1]) : 0;
-        }
-        return 0;
-    };
-    return {
-        knowledge: parseCount(kResp),
-        memories: parseCount(mResp),
-        projects: parseCount(pResp),
-    };
+    try {
+        const headers = { 'Prefer': 'count=exact' };
+        const opts = { headers };
+        const [kResp, mResp, pResp] = await Promise.all([
+            fetch(`${READ_BASE}/knowledge?status=eq.active&select=id&limit=0`, opts),
+            fetch(`${READ_BASE}/memories?status=eq.active&select=id&limit=0`, opts),
+            fetch(`${READ_BASE}/projects?status=in.(active,system)&select=id&limit=0`, opts),
+        ]);
+        const parseCount = (resp) => {
+            const range = resp.headers.get('Content-Range');
+            if (range) {
+                const match = range.match(/\/(\d+)/);
+                return match ? parseInt(match[1]) : 0;
+            }
+            return 0;
+        };
+        return {
+            knowledge: parseCount(kResp),
+            memories: parseCount(mResp),
+            projects: parseCount(pResp),
+        };
+    } catch (err) {
+        addToast('Cannot reach server. Check that containers are running.', 'error');
+        return { knowledge: 0, memories: 0, projects: 0 };
+    }
 }
 
 export async function fetchArchivedCounts() {
-    const headers = { 'Prefer': 'count=exact' };
-    const opts = { headers };
-    const [kResp, mResp, pResp] = await Promise.all([
-        fetch(`${READ_BASE}/knowledge?status=eq.archived&select=id&limit=0`, opts),
-        fetch(`${READ_BASE}/memories?status=eq.archived&select=id&limit=0`, opts),
-        fetch(`${READ_BASE}/projects?status=eq.archived&select=id&limit=0`, opts),
-    ]);
-    const parseCount = (resp) => {
-        const range = resp.headers.get('Content-Range');
-        if (range) {
-            const match = range.match(/\/(\d+)/);
-            return match ? parseInt(match[1]) : 0;
-        }
-        return 0;
-    };
-    return {
-        knowledge: parseCount(kResp),
-        memories: parseCount(mResp),
-        projects: parseCount(pResp),
-    };
+    try {
+        const headers = { 'Prefer': 'count=exact' };
+        const opts = { headers };
+        const [kResp, mResp, pResp] = await Promise.all([
+            fetch(`${READ_BASE}/knowledge?status=eq.archived&select=id&limit=0`, opts),
+            fetch(`${READ_BASE}/memories?status=eq.archived&select=id&limit=0`, opts),
+            fetch(`${READ_BASE}/projects?status=eq.archived&select=id&limit=0`, opts),
+        ]);
+        const parseCount = (resp) => {
+            const range = resp.headers.get('Content-Range');
+            if (range) {
+                const match = range.match(/\/(\d+)/);
+                return match ? parseInt(match[1]) : 0;
+            }
+            return 0;
+        };
+        return {
+            knowledge: parseCount(kResp),
+            memories: parseCount(mResp),
+            projects: parseCount(pResp),
+        };
+    } catch (err) {
+        addToast('Cannot reach server. Check that containers are running.', 'error');
+        return { knowledge: 0, memories: 0, projects: 0 };
+    }
 }
 
 // --- Write API (mcp-gateway REST) ---

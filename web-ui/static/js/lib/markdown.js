@@ -1,6 +1,8 @@
 import '/vendor/marked.min.js';
+import '/vendor/purify.min.js';
 
 const { marked } = window;
+const DOMPurify = window.DOMPurify;
 
 marked.setOptions({
     breaks: true,
@@ -9,5 +11,5 @@ marked.setOptions({
 
 export function renderMarkdown(text) {
     if (!text) return '';
-    return marked.parse(text);
+    return DOMPurify.sanitize(marked.parse(text));
 }

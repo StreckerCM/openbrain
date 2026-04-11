@@ -10,6 +10,12 @@ import { ConfirmModal } from '../components/modal.js';
 
 const html = htm.bind(h);
 
+function apiType(t) {
+    if (t === 'memories') return 'memory';
+    if (t === 'projects') return 'project';
+    return t;
+}
+
 export function ArchivePage() {
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -94,7 +100,7 @@ export function ArchivePage() {
     async function handleRestore(item) {
         try {
             const id = item._type === 'projects' ? (item.name || item.id) : item.id;
-            await unarchiveItem(item._type, id);
+            await unarchiveItem(apiType(item._type), id);
             addToast('Item restored.', 'success');
             await loadArchived();
         } catch (_) {}
@@ -105,7 +111,7 @@ export function ArchivePage() {
         try {
             for (const item of toRestore) {
                 const id = item._type === 'projects' ? (item.name || item.id) : item.id;
-                await unarchiveItem(item._type, id);
+                await unarchiveItem(apiType(item._type), id);
             }
             addToast(`${toRestore.length} item${toRestore.length !== 1 ? 's' : ''} restored.`, 'success');
             await loadArchived();
@@ -114,7 +120,7 @@ export function ArchivePage() {
 
     async function handleBulkDelete() {
         const toDelete = getSelectedItems().map(item => ({
-            type: item._type,
+            type: apiType(item._type),
             id: item._type === 'projects' ? (item.name || item.id) : item.id,
         }));
         try {

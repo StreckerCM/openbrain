@@ -454,7 +454,9 @@ async def _db_search(
 ) -> list[dict]:
     """Search knowledge and/or memories. Returns list of dicts."""
     search_types = types or ["knowledge", "memories"]
-    embedding = await get_embedding(http, query)
+    embedding = None
+    if mode != "exact":
+        embedding = await get_embedding(http, query)
     results = []
 
     if "knowledge" in search_types:
@@ -560,6 +562,115 @@ async def _db_bulk_delete(pool: asyncpg.Pool, items: list[dict]) -> dict:
                 else:
                     raise ValueError(f"Unknown type: {item_type}")
     return deleted
+
+
+async def _db_archive_project(pool: asyncpg.Pool, name: str) -> dict:
+    """Archive a project with full orphan cascade logic.
+
+    Returns a result dict with archived_project, orphan_policy, and counts.
+    Raises ValueError if the project is not found, is a system project, or
+    is already archived.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            proj = await conn.fetchrow(
+                "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
+                name,
+            )
+            if proj is None:
+                raise ValueError(f"Project '{name}' not found")
+            if proj["status"] == "system":
+                raise ValueError(f"Cannot archive system project '{name}'")
+            if proj["status"] == "archived":
+                raise ValueError(f"Project '{name}' is already archived")
+
+            project_id = proj["id"]
+            policy = proj["orphan_policy"] or ORPHAN_POLICY
+
+            await conn.execute(
+                """UPDATE projects SET status = 'archived', updated_at = NOW()
+                   WHERE id = $1""",
+                project_id,
+            )
+
+            linked_knowledge = await conn.fetch(
+                """SELECT knowledge_id FROM project_links
+                   WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+            linked_memories = await conn.fetch(
+                """SELECT memory_id FROM project_links
+                   WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
+                project_id,
+            )
+
+            await conn.execute(
+                """UPDATE project_links SET status = 'archived', archived_at = NOW()
+                   WHERE project_id = $1 AND status = 'active'""",
+                project_id,
+            )
+
+            general_id = await conn.fetchval(
+                "SELECT id FROM projects WHERE name = 'General'"
+            )
+            orphaned_knowledge = []
+            orphaned_memories = []
+
+            for row in linked_knowledge:
+                kid = row["knowledge_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE knowledge_id = $1 AND status = 'active'""",
+                    kid,
+                )
+                if remaining == 0:
+                    orphaned_knowledge.append(kid)
+
+            for row in linked_memories:
+                mid = row["memory_id"]
+                remaining = await conn.fetchval(
+                    """SELECT COUNT(*) FROM project_links
+                       WHERE memory_id = $1 AND status = 'active'""",
+                    mid,
+                )
+                if remaining == 0:
+                    orphaned_memories.append(mid)
+
+            if policy == "reassign":
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, knowledge_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """INSERT INTO project_links (project_id, memory_id, status)
+                           VALUES ($1, $2, 'active')
+                           ON CONFLICT DO NOTHING""",
+                        general_id, mid,
+                    )
+            else:  # archive
+                for kid in orphaned_knowledge:
+                    await conn.execute(
+                        """UPDATE knowledge SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        kid,
+                    )
+                for mid in orphaned_memories:
+                    await conn.execute(
+                        """UPDATE memories SET status = 'archived', updated_at = NOW()
+                           WHERE id = $1""",
+                        mid,
+                    )
+
+    return {
+        "archived_project": name,
+        "orphan_policy": policy,
+        "orphaned_knowledge": len(orphaned_knowledge),
+        "orphaned_memories": len(orphaned_memories),
+    }
 
 
 # --- Knowledge tools ---
@@ -1095,116 +1206,20 @@ async def archive_project(
 ) -> str:
     """Archive a project. Cascades to all its project links and handles orphans.
 
-    The system 'general' project cannot be archived.
+    The system 'General' project cannot be archived.
 
     Orphan policy (per-project setting overrides ORPHAN_POLICY env var):
     - "archive": orphaned entities are archived
-    - "reassign": orphaned entities are linked to the 'general' project
+    - "reassign": orphaned entities are linked to the 'General' project
 
     Args:
         name: Project name
     """
     app = _get_app_ctx(ctx)
-    async with app.pool.acquire() as conn:
-        async with conn.transaction():
-            proj = await conn.fetchrow(
-                "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
-                name,
-            )
-            if proj is None:
-                return json.dumps({"error": f"Project '{name}' not found"})
-            if proj["status"] == "system":
-                return json.dumps({"error": f"Cannot archive system project '{name}'"})
-            if proj["status"] == "archived":
-                return json.dumps({"error": f"Project '{name}' is already archived"})
-
-            project_id = proj["id"]
-            policy = proj["orphan_policy"] or ORPHAN_POLICY
-
-            await conn.execute(
-                """UPDATE projects SET status = 'archived', updated_at = NOW()
-                   WHERE id = $1""",
-                project_id,
-            )
-
-            linked_knowledge = await conn.fetch(
-                """SELECT knowledge_id FROM project_links
-                   WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
-                project_id,
-            )
-            linked_memories = await conn.fetch(
-                """SELECT memory_id FROM project_links
-                   WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
-                project_id,
-            )
-
-            await conn.execute(
-                """UPDATE project_links SET status = 'archived', archived_at = NOW()
-                   WHERE project_id = $1 AND status = 'active'""",
-                project_id,
-            )
-
-            general_id = await conn.fetchval(
-                "SELECT id FROM projects WHERE name = 'general'"
-            )
-            orphaned_knowledge = []
-            orphaned_memories = []
-
-            for row in linked_knowledge:
-                kid = row["knowledge_id"]
-                remaining = await conn.fetchval(
-                    """SELECT COUNT(*) FROM project_links
-                       WHERE knowledge_id = $1 AND status = 'active'""",
-                    kid,
-                )
-                if remaining == 0:
-                    orphaned_knowledge.append(kid)
-
-            for row in linked_memories:
-                mid = row["memory_id"]
-                remaining = await conn.fetchval(
-                    """SELECT COUNT(*) FROM project_links
-                       WHERE memory_id = $1 AND status = 'active'""",
-                    mid,
-                )
-                if remaining == 0:
-                    orphaned_memories.append(mid)
-
-            if policy == "reassign":
-                for kid in orphaned_knowledge:
-                    await conn.execute(
-                        """INSERT INTO project_links (project_id, knowledge_id, status)
-                           VALUES ($1, $2, 'active')
-                           ON CONFLICT DO NOTHING""",
-                        general_id, kid,
-                    )
-                for mid in orphaned_memories:
-                    await conn.execute(
-                        """INSERT INTO project_links (project_id, memory_id, status)
-                           VALUES ($1, $2, 'active')
-                           ON CONFLICT DO NOTHING""",
-                        general_id, mid,
-                    )
-            else:  # archive
-                for kid in orphaned_knowledge:
-                    await conn.execute(
-                        """UPDATE knowledge SET status = 'archived', updated_at = NOW()
-                           WHERE id = $1""",
-                        kid,
-                    )
-                for mid in orphaned_memories:
-                    await conn.execute(
-                        """UPDATE memories SET status = 'archived', updated_at = NOW()
-                           WHERE id = $1""",
-                        mid,
-                    )
-
-    result = {
-        "archived_project": name,
-        "orphan_policy": policy,
-        "orphaned_knowledge": len(orphaned_knowledge),
-        "orphaned_memories": len(orphaned_memories),
-    }
+    try:
+        result = await _db_archive_project(app.pool, name)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
     return json.dumps(result, indent=2)
 
 
@@ -1391,7 +1406,6 @@ async def unlink_from_project(
 # ---------------------------------------------------------------------------
 
 from starlette.applications import Starlette
-from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -1596,109 +1610,14 @@ async def rest_archive(request: Request) -> JSONResponse:
     entity_id = request.path_params["id"]
 
     if entity_type == "project":
-        # Full project archive with orphan handling (mirrors archive_project MCP tool)
-        pool = _get_pool()
-        name = entity_id
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                proj = await conn.fetchrow(
-                    "SELECT id, status, orphan_policy FROM projects WHERE name = $1",
-                    name,
-                )
-                if proj is None:
-                    return _err(f"Project '{name}' not found", 404)
-                if proj["status"] == "system":
-                    return _err(f"Cannot archive system project '{name}'", 400)
-                if proj["status"] == "archived":
-                    return _err(f"Project '{name}' is already archived", 400)
-
-                project_id = proj["id"]
-                policy = proj["orphan_policy"] or ORPHAN_POLICY
-
-                await conn.execute(
-                    """UPDATE projects SET status = 'archived', updated_at = NOW()
-                       WHERE id = $1""",
-                    project_id,
-                )
-
-                linked_knowledge = await conn.fetch(
-                    """SELECT knowledge_id FROM project_links
-                       WHERE project_id = $1 AND knowledge_id IS NOT NULL AND status = 'active'""",
-                    project_id,
-                )
-                linked_memories = await conn.fetch(
-                    """SELECT memory_id FROM project_links
-                       WHERE project_id = $1 AND memory_id IS NOT NULL AND status = 'active'""",
-                    project_id,
-                )
-
-                await conn.execute(
-                    """UPDATE project_links SET status = 'archived', archived_at = NOW()
-                       WHERE project_id = $1 AND status = 'active'""",
-                    project_id,
-                )
-
-                general_id = await conn.fetchval(
-                    "SELECT id FROM projects WHERE name = 'general'"
-                )
-                orphaned_knowledge = []
-                orphaned_memories = []
-
-                for row in linked_knowledge:
-                    kid = row["knowledge_id"]
-                    remaining = await conn.fetchval(
-                        """SELECT COUNT(*) FROM project_links
-                           WHERE knowledge_id = $1 AND status = 'active'""",
-                        kid,
-                    )
-                    if remaining == 0:
-                        orphaned_knowledge.append(kid)
-
-                for row in linked_memories:
-                    mid = row["memory_id"]
-                    remaining = await conn.fetchval(
-                        """SELECT COUNT(*) FROM project_links
-                           WHERE memory_id = $1 AND status = 'active'""",
-                        mid,
-                    )
-                    if remaining == 0:
-                        orphaned_memories.append(mid)
-
-                if policy == "reassign":
-                    for kid in orphaned_knowledge:
-                        await conn.execute(
-                            """INSERT INTO project_links (project_id, knowledge_id, status)
-                               VALUES ($1, $2, 'active')
-                               ON CONFLICT DO NOTHING""",
-                            general_id, kid,
-                        )
-                    for mid in orphaned_memories:
-                        await conn.execute(
-                            """INSERT INTO project_links (project_id, memory_id, status)
-                               VALUES ($1, $2, 'active')
-                               ON CONFLICT DO NOTHING""",
-                            general_id, mid,
-                        )
-                else:  # archive
-                    for kid in orphaned_knowledge:
-                        await conn.execute(
-                            """UPDATE knowledge SET status = 'archived', updated_at = NOW()
-                               WHERE id = $1""",
-                            kid,
-                        )
-                    for mid in orphaned_memories:
-                        await conn.execute(
-                            """UPDATE memories SET status = 'archived', updated_at = NOW()
-                               WHERE id = $1""",
-                            mid,
-                        )
-
-        return _json({
-            "archived_project": name,
-            "orphan_policy": policy,
-            "orphaned_knowledge": len(orphaned_knowledge),
-            "orphaned_memories": len(orphaned_memories),
-        })
+        # Full project archive with orphan handling (delegates to shared helper)
+        try:
+            result = await _db_archive_project(_get_pool(), entity_id)
+        except ValueError as e:
+            msg = str(e)
+            status = 404 if "not found" in msg else 400
+            return _err(msg, status)
+        return _json(result)
 
     # knowledge or memory
     if entity_type not in ("knowledge", "memory"):
@@ -1878,12 +1797,6 @@ async def _combined_app(scope, receive, send):
 rest_app = Starlette(
     routes=rest_routes,
     lifespan=_rest_lifespan,
-)
-rest_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 app = _combined_app
