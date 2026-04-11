@@ -1,4 +1,4 @@
-import { h } from 'preact';
+import { h, Fragment } from 'preact';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -21,10 +21,10 @@ export function Modal({ title, children, onClose, actions }) {
 
 export function ConfirmModal({ title, message, confirmLabel = 'Confirm', confirmClass = 'btn btn-danger', onConfirm, onCancel }) {
     const actions = html`
-        <>
+        <${Fragment}>
             <button class="btn btn-secondary" onClick=${onCancel}>Cancel</button>
             <button class=${confirmClass} onClick=${onConfirm}>${confirmLabel}</button>
-        </>
+        <//>
     `;
 
     return html`

@@ -1,4 +1,4 @@
-import { h } from 'preact';
+import { h, Fragment } from 'preact';
 import htm from 'htm';
 import { currentRoute, sidebarOpen, navigate } from '../lib/state.js';
 
@@ -32,7 +32,7 @@ export function Sidebar() {
     }
 
     return html`
-        <>
+        <${Fragment}>
             <button class="hamburger" onClick=${toggleSidebar} aria-label="Toggle sidebar">☰</button>
             <div class=${'sidebar-backdrop' + (isOpen ? ' open' : '')} onClick=${closeBackdrop}></div>
             <aside class=${'sidebar' + (isOpen ? ' open' : '')}>
@@ -59,6 +59,6 @@ export function Sidebar() {
                     </div>
                 </nav>
             </aside>
-        </>
+        <//>
     `;
 }

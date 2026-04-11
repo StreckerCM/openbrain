@@ -1,4 +1,4 @@
-import { h } from 'preact';
+import { h, Fragment } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { navigate, addToast } from '../lib/state.js';
@@ -90,7 +90,7 @@ function KnowledgeList() {
 
     function filters(values, update) {
         return html`
-            <>
+            <${Fragment}>
                 <input
                     class="filter-input"
                     type="text"
@@ -107,7 +107,7 @@ function KnowledgeList() {
                     ${allProjects.map(p => html`<option key=${p.name} value=${p.name}>${p.name}</option>`)}
                 </select>
                 <button class="btn btn-primary" onClick=${() => navigate('#/knowledge/new')}>+ New Entry</button>
-            </>
+            <//>
         `;
     }
 
