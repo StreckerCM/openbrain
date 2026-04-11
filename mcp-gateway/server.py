@@ -1841,7 +1841,8 @@ rest_routes = [
 ]
 
 
-async def _on_startup():
+@asynccontextmanager
+async def _rest_lifespan(app):
     global _rest_app_ctx
     pool = await asyncpg.create_pool(
         host=DB_HOST, port=DB_PORT, database=DB_NAME,
@@ -1849,13 +1850,11 @@ async def _on_startup():
     )
     http = httpx.AsyncClient()
     _rest_app_ctx = AppContext(pool=pool, http=http)
-
-
-async def _on_shutdown():
-    global _rest_app_ctx
-    if _rest_app_ctx:
-        await _rest_app_ctx.http.aclose()
-        await _rest_app_ctx.pool.close()
+    try:
+        yield
+    finally:
+        await http.aclose()
+        await pool.close()
 
 
 # Build the MCP ASGI app (handles /mcp path)
@@ -1866,7 +1865,6 @@ async def _combined_app(scope, receive, send):
     """Route requests: /api/* -> REST app, /mcp* -> MCP app."""
     path = scope.get("path", "")
     if scope["type"] == "lifespan":
-        # Let the REST app handle lifespan (startup/shutdown)
         await rest_app(scope, receive, send)
         return
     if path.startswith("/api"):
@@ -1877,8 +1875,7 @@ async def _combined_app(scope, receive, send):
 
 rest_app = Starlette(
     routes=rest_routes,
-    on_startup=[_on_startup],
-    on_shutdown=[_on_shutdown],
+    lifespan=_rest_lifespan,
 )
 rest_app.add_middleware(
     CORSMiddleware,
