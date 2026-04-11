@@ -7,12 +7,12 @@ const html = htm.bind(h);
 
 const PAGE_SIZE = 20;
 
-export function EntityList({ fetchFn, columns = [], gridTemplate, detailRoute, filters, emptyMessage = 'No items found.' }) {
+export function EntityList({ fetchFn, columns = [], gridTemplate, detailRoute, filters, emptyMessage = 'No items found.', initialFilters = {} }) {
     const [items, setItems] = useState([]);
     const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(true);
     const [hasMore, setHasMore] = useState(false);
-    const [filterValues, setFilterValues] = useState({});
+    const [filterValues, setFilterValues] = useState(initialFilters);
 
     useEffect(() => {
         setPage(1);

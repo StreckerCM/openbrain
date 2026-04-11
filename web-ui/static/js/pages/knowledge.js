@@ -53,9 +53,8 @@ function KnowledgeList({ initialTag = '' }) {
         if (filters.project) {
             params.push(`projects=cs.%7B${encodeURIComponent(filters.project)}%7D`);
         }
-        const tagFilter = filters.tag || initialTag;
-        if (tagFilter) {
-            params.push(`tags=cs.%7B${encodeURIComponent(tagFilter)}%7D`);
+        if (filters.tag) {
+            params.push(`tags=cs.%7B${encodeURIComponent(filters.tag)}%7D`);
         }
         return readKnowledge(params.join('&'));
     }
@@ -125,6 +124,7 @@ function KnowledgeList({ initialTag = '' }) {
                 detailRoute=${item => '#/knowledge/' + item.id}
                 filters=${filters}
                 emptyMessage="No knowledge entries found."
+                initialFilters=${initialTag ? { tag: initialTag } : {}}
             />
         </div>
     `;
@@ -334,5 +334,5 @@ export function KnowledgePage({ param = '', query = {} }) {
     }
     if (param && !isNaN(param)) return html`<${KnowledgeDetail} id=${param} />`;
     const tag = query.tag || '';
-    return html`<${KnowledgeList} key=${'list-' + tag} initialTag=${tag} />`;
+    return html`<${KnowledgeList} key=${tag} initialTag=${tag} />`;
 }
