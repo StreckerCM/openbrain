@@ -2,7 +2,8 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { navigate } from '../lib/state.js';
-import { fetchCounts, fetchArchivedCounts, readRecentActivity, readOrphanedItems } from '../lib/api.js';
+import { fetchCounts, fetchArchivedCounts, readRecentActivity, readOrphanedItems, fetchTagStats } from '../lib/api.js';
+import { TagCloudWidget } from '../components/tag-cloud.js';
 
 const html = htm.bind(h);
 
@@ -22,6 +23,7 @@ export function DashboardPage() {
     const [archivedCounts, setArchivedCounts] = useState(null);
     const [activity, setActivity] = useState([]);
     const [orphans, setOrphans] = useState([]);
+    const [topTags, setTopTags] = useState([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -31,12 +33,14 @@ export function DashboardPage() {
             fetchArchivedCounts().catch(() => ({ knowledge: 0, memories: 0, projects: 0 })),
             readRecentActivity(10).catch(() => []),
             readOrphanedItems().catch(() => []),
-        ]).then(([c, ac, act, orph]) => {
+            fetchTagStats('order=entry_count.desc&limit=20').catch(() => []),
+        ]).then(([c, ac, act, orph, tags]) => {
             if (!cancelled) {
                 setCounts(c);
                 setArchivedCounts(ac);
                 setActivity(Array.isArray(act) ? act : []);
                 setOrphans(Array.isArray(orph) ? orph : []);
+                setTopTags(Array.isArray(tags) ? tags : []);
                 setLoading(false);
             }
         });
@@ -74,6 +78,18 @@ export function DashboardPage() {
                     <div class="stat-value" style=${orphanCount > 0 ? 'color:var(--warning)' : ''}>${orphanCount}</div>
                     <div class="stat-sub" style="color:var(--warning);">${orphanCount > 0 ? 'need attention' : 'all linked'}</div>
                 </div>
+            </div>
+
+            <div class="card" style="margin-bottom:20px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <span style="font-size:14px;font-weight:600;">Top Tags</span>
+                </div>
+                <${TagCloudWidget}
+                    tags=${topTags}
+                    limit=${20}
+                    showViewAll=${true}
+                    totalCount=${0}
+                />
             </div>
 
             <div class="two-col">
