@@ -46,9 +46,12 @@ cp .env.example .env
 OPENAI_API_KEY=sk-your-key-here
 POSTGRES_PASSWORD=change-me
 PGRST_JWT_SECRET=<output of: openssl rand -hex 32>
+
+# Optional — Sentry error tracking (https://sentry.io)
+SENTRY_DSN=
 ```
 
-`POSTGRES_DB` and `POSTGRES_USER` default to `openbrain` if not set.
+`POSTGRES_DB` and `POSTGRES_USER` default to `openbrain` if not set. `SENTRY_DSN` is optional — if set, error tracking is enabled across mcp-gateway, embedder, and the web UI.
 
 ### 2. Start the stack
 
