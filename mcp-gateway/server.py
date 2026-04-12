@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -1789,6 +1790,73 @@ async def _rest_lifespan(app):
 mcp_asgi = mcp.streamable_http_app()
 
 
+async def _start_mcp_lifespan():
+    """Send lifespan.startup to the MCP ASGI app so its session manager initializes."""
+    startup_complete = asyncio.Event()
+    shutdown_event = asyncio.Event()
+    receive_queue = asyncio.Queue()
+
+    async def mcp_receive():
+        return await receive_queue.get()
+
+    async def mcp_send(msg):
+        if msg["type"] == "lifespan.startup.complete":
+            startup_complete.set()
+        elif msg["type"] == "lifespan.shutdown.complete":
+            shutdown_event.set()
+
+    await receive_queue.put({"type": "lifespan.startup"})
+    mcp_task = asyncio.create_task(
+        mcp_asgi({"type": "lifespan", "asgi": {"version": "3.0"}}, mcp_receive, mcp_send)
+    )
+    await startup_complete.wait()
+    return mcp_task, receive_queue, shutdown_event
+
+
+async def _stop_mcp_lifespan(mcp_task, receive_queue, shutdown_event):
+    """Send lifespan.shutdown to the MCP ASGI app."""
+    await receive_queue.put({"type": "lifespan.shutdown"})
+    await shutdown_event.wait()
+    mcp_task.cancel()
+    try:
+        await mcp_task
+    except asyncio.CancelledError:
+        pass
+
+
+_mcp_lifespan_state = {}
+
+
+@asynccontextmanager
+async def _rest_and_mcp_lifespan(app):
+    """Combined lifespan: start DB pool + MCP session manager."""
+    global _rest_app_ctx
+    pool = await asyncpg.create_pool(
+        host=DB_HOST, port=DB_PORT, database=DB_NAME,
+        user=DB_USER, password=DB_PASS, min_size=2, max_size=10,
+    )
+    http = httpx.AsyncClient()
+    _rest_app_ctx = AppContext(pool=pool, http=http)
+
+    mcp_task, receive_queue, shutdown_event = await _start_mcp_lifespan()
+    _mcp_lifespan_state["task"] = mcp_task
+    _mcp_lifespan_state["queue"] = receive_queue
+    _mcp_lifespan_state["event"] = shutdown_event
+
+    try:
+        yield
+    finally:
+        await _stop_mcp_lifespan(mcp_task, receive_queue, shutdown_event)
+        await http.aclose()
+        await pool.close()
+
+
+rest_app = Starlette(
+    routes=rest_routes,
+    lifespan=_rest_and_mcp_lifespan,
+)
+
+
 async def _combined_app(scope, receive, send):
     """Route requests: /api/* -> REST app, /mcp* -> MCP app."""
     path = scope.get("path", "")
@@ -1801,16 +1869,10 @@ async def _combined_app(scope, receive, send):
         await mcp_asgi(scope, receive, send)
 
 
-rest_app = Starlette(
-    routes=rest_routes,
-    lifespan=_rest_lifespan,
-)
-
 app = _combined_app
 
 
 if __name__ == "__main__":
-    import asyncio
     import uvicorn
 
     print("[startup] Applying database schema...", flush=True)
