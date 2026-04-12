@@ -73,6 +73,7 @@ async def _apply_schema() -> None:
         host=DB_HOST, port=DB_PORT, database=DB_NAME,
         user=DB_USER, password=DB_PASS,
     )
+    errors = []
     try:
         await conn.execute(schema_sql)
         print("[schema] init.sql applied successfully", flush=True)
@@ -83,9 +84,18 @@ async def _apply_schema() -> None:
             try:
                 await conn.execute(stmt)
             except Exception as stmt_err:
+                errors.append(str(stmt_err))
                 print(f"[schema] Skipped statement: {stmt_err}", flush=True)
-    finally:
-        await conn.close()
+        if errors:
+            print(f"[schema] Completed with {len(errors)} skipped statement(s)", flush=True)
+        else:
+            print("[schema] All statements applied successfully", flush=True)
+    try:
+        await conn.execute("NOTIFY pgrst, 'reload schema'")
+        print("[schema] Notified PostgREST to reload schema cache", flush=True)
+    except Exception:
+        pass
+    await conn.close()
 
 
 @asynccontextmanager
