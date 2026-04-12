@@ -12,6 +12,7 @@ import { MemoriesPage } from './pages/memories.js';
 import { ProjectsPage } from './pages/projects.js';
 import { SearchPage } from './pages/search.js';
 import { ArchivePage } from './pages/archive.js';
+import { TagsPage } from './pages/tags.js';
 
 function parseRoute(route) {
     const path = route.replace('#/', '').split('?')[0];
@@ -31,6 +32,7 @@ function Router() {
         case 'projects': return html`<${ProjectsPage} param=${param} query=${query} />`;
         case 'search': return html`<${SearchPage} query=${query} />`;
         case 'archive': return html`<${ArchivePage} />`;
+        case 'tags': return html`<${TagsPage} query=${query} />`;
         default: return html`<${DashboardPage} />`;
     }
 }

@@ -10,6 +10,7 @@ const NAV_ITEMS = [
     { label: 'Memories', href: '#/memories' },
     { label: 'Projects', href: '#/projects' },
     { label: 'Search', href: '#/search' },
+    { label: 'Tags', href: '#/tags' },
 ];
 
 const ARCHIVE_ITEM = { label: 'Archive', href: '#/archive' };
