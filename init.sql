@@ -337,9 +337,11 @@ SELECT
 FROM knowledge k,
      LATERAL UNNEST(k.tags) AS tag
 WHERE k.status = 'active'
-  AND k.tags != '{}'
 GROUP BY tag
 ORDER BY entry_count DESC, tag ASC;
+
+-- Notify PostgREST to reload schema so the new view is exposed
+NOTIFY pgrst, 'reload schema';
 
 -- Function: return active knowledge and memories not linked to any active project
 CREATE OR REPLACE FUNCTION orphaned_items()

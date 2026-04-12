@@ -88,7 +88,6 @@ export function DashboardPage() {
                     tags=${topTags}
                     limit=${20}
                     showViewAll=${true}
-                    totalCount=${0}
                 />
             </div>
 
