@@ -189,16 +189,22 @@ async def _db_add_knowledge(
 async def _db_update_knowledge(pool: asyncpg.Pool, kid: int, **fields) -> dict | None:
     """Partial update of a knowledge entry. Returns updated row or None."""
     allowed = {"title", "content", "category", "url", "tags", "project"}
+    text_fields = {"title", "content", "category", "project"}
     sets = []
     params = []
     idx = 1
+    needs_reembed = False
     for col, val in fields.items():
         if col in allowed and val is not None:
             sets.append(f"{col} = ${idx}")
             params.append(val)
             idx += 1
+            if col in text_fields:
+                needs_reembed = True
     if not sets:
         return None
+    if needs_reembed:
+        sets.append("embedding = NULL")
     sets.append("updated_at = NOW()")
     params.append(kid)
     query = f"""UPDATE knowledge SET {', '.join(sets)}
@@ -266,16 +272,22 @@ async def _db_save_memory(
 async def _db_update_memory(pool: asyncpg.Pool, mid: int, **fields) -> dict | None:
     """Partial update of a memory. Returns updated row or None."""
     allowed = {"memory_type", "name", "content", "description", "project"}
+    text_fields = {"name", "content", "description", "memory_type"}
     sets = []
     params = []
     idx = 1
+    needs_reembed = False
     for col, val in fields.items():
         if col in allowed and val is not None:
             sets.append(f"{col} = ${idx}")
             params.append(val)
             idx += 1
+            if col in text_fields:
+                needs_reembed = True
     if not sets:
         return None
+    if needs_reembed:
+        sets.append("embedding = NULL")
     sets.append("updated_at = NOW()")
     params.append(mid)
     query = f"""UPDATE memories SET {', '.join(sets)}
@@ -839,6 +851,42 @@ async def list_knowledge(
             status_filter, category, tags, limit,
         )
     return _format_rows(rows)
+
+
+@mcp.tool()
+async def update_knowledge(
+    id: int,
+    title: str | None = None,
+    content: str | None = None,
+    category: str | None = None,
+    url: str | None = None,
+    tags: list[str] | None = None,
+    ctx: Context = None,
+) -> str:
+    """Update an existing knowledge entry. Only provided fields are changed.
+
+    Changing text fields (title, content, category) triggers re-embedding
+    so semantic search stays current.
+
+    Args:
+        id: Knowledge entry ID
+        title: New title
+        content: New content
+        category: New category
+        url: New URL
+        tags: New tags list
+    """
+    app = _get_app_ctx(ctx)
+    fields = {}
+    if title is not None: fields["title"] = title
+    if content is not None: fields["content"] = content
+    if category is not None: fields["category"] = category
+    if url is not None: fields["url"] = url
+    if tags is not None: fields["tags"] = tags
+    result = await _db_update_knowledge(app.pool, id, **fields)
+    if result is None:
+        return json.dumps({"error": f"Knowledge entry {id} not found or no fields to update"})
+    return json.dumps(result, default=str, indent=2)
 
 
 # --- Project tools ---
