@@ -1794,6 +1794,99 @@ async def rest_bulk_delete(request: Request) -> JSONResponse:
         return _err(str(e), 400)
     return _json(result)
 
+# --- Tag Management REST ---
+
+
+async def rest_tags_merge(request: Request) -> JSONResponse:
+    body = await request.json()
+    source_tags = body.get("source_tags")
+    target_tag = body.get("target_tag")
+    if not source_tags or not isinstance(source_tags, list) or not target_tag:
+        return _err("source_tags (array) and target_tag (string) are required", 400)
+    if not target_tag.strip():
+        return _err("target_tag cannot be empty", 400)
+    target_tag = target_tag.strip()
+
+    pool = _get_pool()
+    # Find all knowledge entries that have any of the source tags
+    rows = await pool.fetch(
+        "SELECT id, tags FROM knowledge WHERE status = 'active' AND tags && $1",
+        source_tags,
+    )
+    updated = 0
+    for row in rows:
+        old_tags = list(row["tags"])
+        new_tags = [t for t in old_tags if t not in source_tags]
+        if target_tag not in new_tags:
+            new_tags.append(target_tag)
+        if new_tags != old_tags:
+            await pool.execute(
+                "UPDATE knowledge SET tags = $1, updated_at = NOW() WHERE id = $2",
+                new_tags, row["id"],
+            )
+            updated += 1
+    return _json({"updated_count": updated, "target_tag": target_tag})
+
+
+async def rest_tags_rename(request: Request) -> JSONResponse:
+    body = await request.json()
+    old_tag = body.get("old_tag")
+    new_tag = body.get("new_tag")
+    if not old_tag or not new_tag:
+        return _err("old_tag and new_tag are required", 400)
+    new_tag = new_tag.strip()
+    if not new_tag:
+        return _err("new_tag cannot be empty", 400)
+
+    pool = _get_pool()
+    rows = await pool.fetch(
+        "SELECT id, tags FROM knowledge WHERE status = 'active' AND $1 = ANY(tags)",
+        old_tag,
+    )
+    updated = 0
+    for row in rows:
+        old_tags = list(row["tags"])
+        new_tags = [new_tag if t == old_tag else t for t in old_tags]
+        # Deduplicate in case new_tag already existed
+        seen = set()
+        deduped = []
+        for t in new_tags:
+            if t not in seen:
+                seen.add(t)
+                deduped.append(t)
+        if deduped != old_tags:
+            await pool.execute(
+                "UPDATE knowledge SET tags = $1, updated_at = NOW() WHERE id = $2",
+                deduped, row["id"],
+            )
+            updated += 1
+    return _json({"updated_count": updated, "old_tag": old_tag, "new_tag": new_tag})
+
+
+async def rest_tags_delete(request: Request) -> JSONResponse:
+    body = await request.json()
+    tag = body.get("tag")
+    if not tag:
+        return _err("tag is required", 400)
+
+    pool = _get_pool()
+    rows = await pool.fetch(
+        "SELECT id, tags FROM knowledge WHERE status = 'active' AND $1 = ANY(tags)",
+        tag,
+    )
+    updated = 0
+    for row in rows:
+        old_tags = list(row["tags"])
+        new_tags = [t for t in old_tags if t != tag]
+        if new_tags != old_tags:
+            await pool.execute(
+                "UPDATE knowledge SET tags = $1, updated_at = NOW() WHERE id = $2",
+                new_tags, row["id"],
+            )
+            updated += 1
+    return _json({"updated_count": updated, "deleted_tag": tag})
+
+
 
 # ---------------------------------------------------------------------------
 # Combined ASGI app: REST + MCP
@@ -1815,7 +1908,11 @@ rest_routes = [
     Route("/api/link", rest_unlink, methods=["DELETE"]),
     Route("/api/search", rest_search, methods=["POST"]),
     Route("/api/bulk-delete", rest_bulk_delete, methods=["DELETE"]),
+    Route("/api/tags/merge", rest_tags_merge, methods=["POST"]),
+    Route("/api/tags/rename", rest_tags_rename, methods=["POST"]),
+    Route("/api/tags/delete", rest_tags_delete, methods=["POST"]),
 ]
+
 
 
 @asynccontextmanager

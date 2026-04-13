@@ -315,3 +315,109 @@ a:hover { color: var(--accent-hover); }
     cursor: pointer; text-decoration: none;
 }
 .chip-tag-link:hover { opacity: 0.85; color: var(--tag-text); }
+
+/* --- Tag Cloud --- */
+.tag-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    line-height: 2;
+}
+.tag-cloud-item {
+    color: var(--tag-text);
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: 500;
+    transition: opacity 0.15s;
+}
+.tag-cloud-item:hover {
+    opacity: 1 !important;
+    text-decoration: underline;
+}
+.link-subtle {
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+}
+.link-subtle:hover {
+    text-decoration: underline;
+}
+
+/* --- Tags Page --- */
+.tags-filter-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+.tags-filter-bar .filter-pills {
+    display: flex;
+    gap: 6px;
+}
+.filter-pill {
+    background: var(--surface);
+    border: 1px solid transparent;
+    padding: 4px 12px;
+    border-radius: 16px;
+    font-size: 12px;
+    color: var(--text-2);
+    cursor: pointer;
+}
+.filter-pill.active {
+    border-color: var(--accent);
+    color: var(--text-1);
+}
+.tags-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.tags-table th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+}
+.tags-table th.sortable-th {
+    cursor: pointer;
+    user-select: none;
+}
+.tags-table th.sortable-th:hover {
+    color: var(--text-1);
+}
+.tags-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 13px;
+}
+.tags-table tr:hover {
+    background: rgba(255,255,255,0.02);
+}
+.tags-table tr.selected {
+    background: var(--surface);
+}
+.tags-table .tag-name {
+    color: var(--tag-text);
+    cursor: pointer;
+}
+.tags-table .tag-name:hover {
+    text-decoration: underline;
+}
+.bulk-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+}
+.bulk-bar .actions {
+    display: flex;
+    gap: 8px;
+}

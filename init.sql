@@ -300,6 +300,7 @@ $$;
 DROP VIEW IF EXISTS knowledge_with_projects CASCADE;
 DROP VIEW IF EXISTS memories_with_projects CASCADE;
 DROP VIEW IF EXISTS recent_activity CASCADE;
+DROP VIEW IF EXISTS tag_stats CASCADE;
 
 -- View: knowledge items with their associated project names
 CREATE OR REPLACE VIEW knowledge_with_projects AS
@@ -326,6 +327,21 @@ FROM knowledge WHERE status = 'active'
 UNION ALL
 SELECT id, 'memory' AS type, name, memory_type AS subtype, updated_at
 FROM memories WHERE status = 'active';
+
+-- View: distinct tags with usage counts and last-used timestamps
+CREATE OR REPLACE VIEW tag_stats AS
+SELECT
+    tag,
+    COUNT(*) AS entry_count,
+    MAX(k.updated_at) AS last_used
+FROM knowledge k,
+     LATERAL UNNEST(k.tags) AS tag
+WHERE k.status = 'active'
+GROUP BY tag
+ORDER BY entry_count DESC, tag ASC;
+
+-- Notify PostgREST to reload schema so the new view is exposed
+NOTIFY pgrst, 'reload schema';
 
 -- Function: return active knowledge and memories not linked to any active project
 CREATE OR REPLACE FUNCTION orphaned_items()

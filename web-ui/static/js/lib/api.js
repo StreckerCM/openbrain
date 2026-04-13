@@ -196,3 +196,32 @@ export function bulkDelete(items) {
         body: JSON.stringify({ items }),
     });
 }
+
+// --- Tag Stats (Read via PostgREST) ---
+
+export function fetchTagStats(params = '') {
+    return request(`${READ_BASE}/tag_stats?${params}`);
+}
+
+// --- Tag Management (Write) ---
+
+export function mergeTags(sourceTags, targetTag) {
+    return request(`${WRITE_BASE}/tags/merge`, {
+        method: 'POST',
+        body: JSON.stringify({ source_tags: sourceTags, target_tag: targetTag }),
+    });
+}
+
+export function renameTag(oldTag, newTag) {
+    return request(`${WRITE_BASE}/tags/rename`, {
+        method: 'POST',
+        body: JSON.stringify({ old_tag: oldTag, new_tag: newTag }),
+    });
+}
+
+export function deleteTag(tag) {
+    return request(`${WRITE_BASE}/tags/delete`, {
+        method: 'POST',
+        body: JSON.stringify({ tag }),
+    });
+}
