@@ -383,6 +383,13 @@ a:hover { color: var(--accent-hover); }
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
 }
+.tags-table th.sortable-th {
+    cursor: pointer;
+    user-select: none;
+}
+.tags-table th.sortable-th:hover {
+    color: var(--text-1);
+}
 .tags-table td {
     padding: 8px 12px;
     border-bottom: 1px solid var(--border-subtle);

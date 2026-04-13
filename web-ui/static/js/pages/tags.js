@@ -24,7 +24,8 @@ export function TagsPage() {
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [filter, setFilter] = useState('all'); // 'all' | 'once' | 'multi'
-    const [sort, setSort] = useState('count'); // 'count' | 'alpha'
+    const [sortBy, setSortBy] = useState('count'); // 'count' | 'tag'
+    const [sortDir, setSortDir] = useState('desc'); // 'asc' | 'desc'
     const [selected, setSelected] = useState(new Set());
     const [modal, setModal] = useState(null); // null | 'merge' | 'rename' | 'delete'
     const [mergeTarget, setMergeTarget] = useState('');
@@ -51,11 +52,31 @@ export function TagsPage() {
     }
     if (filter === 'once') filtered = filtered.filter(t => t.entry_count === 1);
     if (filter === 'multi') filtered = filtered.filter(t => t.entry_count > 1);
-    if (sort === 'alpha') {
-        filtered = [...filtered].sort((a, b) => a.tag.localeCompare(b.tag));
-    }
+    filtered = [...filtered].sort((a, b) => {
+        let cmp;
+        if (sortBy === 'tag') {
+            cmp = a.tag.localeCompare(b.tag);
+        } else {
+            cmp = a.entry_count - b.entry_count;
+        }
+        return sortDir === 'asc' ? cmp : -cmp;
+    });
 
     const counts = { all: allTags.length, once: allTags.filter(t => t.entry_count === 1).length, multi: allTags.filter(t => t.entry_count > 1).length };
+
+    function toggleSort(col) {
+        if (sortBy === col) {
+            setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+        } else {
+            setSortBy(col);
+            setSortDir(col === 'tag' ? 'asc' : 'desc');
+        }
+    }
+
+    function sortArrow(col) {
+        if (sortBy !== col) return '';
+        return sortDir === 'asc' ? ' ↑' : ' ↓';
+    }
 
     function toggleSelect(tag) {
         const next = new Set(selected);
@@ -152,11 +173,6 @@ export function TagsPage() {
                         <span class=${'filter-pill' + (filter === 'multi' ? ' active' : '')} onClick=${() => setFilter('multi')}>Multi-use (${counts.multi})</span>
                     </div>
                 </div>
-                <div style="display:flex;gap:6px;align-items:center;">
-                    <span style="font-size:11px;color:var(--text-3);">Sort:</span>
-                    <span class=${'filter-pill' + (sort === 'count' ? ' active' : '')} onClick=${() => setSort('count')}>Count ↓</span>
-                    <span class=${'filter-pill' + (sort === 'alpha' ? ' active' : '')} onClick=${() => setSort('alpha')}>A–Z</span>
-                </div>
             </div>
 
             <!-- Tag cloud -->
@@ -190,8 +206,8 @@ export function TagsPage() {
                                     checked=${selected.size === filtered.length && filtered.length > 0}
                                     onChange=${toggleSelectAll} />
                             </th>
-                            <th>Tag</th>
-                            <th style="width:80px;">Entries</th>
+                            <th class="sortable-th" onClick=${() => toggleSort('tag')}>Tag${sortArrow('tag')}</th>
+                            <th class="sortable-th" style="width:80px;" onClick=${() => toggleSort('count')}>Entries${sortArrow('count')}</th>
                             <th style="width:120px;">Last used</th>
                         </tr>
                     </thead>
