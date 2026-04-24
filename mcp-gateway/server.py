@@ -145,6 +145,17 @@ def _format_rows(rows: list[asyncpg.Record]) -> str:
     return json.dumps([dict(r) for r in rows], default=str, indent=2)
 
 
+def _resolve_id(primary: int | None, alias: int | None, alias_name: str) -> int | None:
+    # LLM callers sometimes pass the qualified form (e.g. knowledge_id) learned
+    # from link_to_project instead of the bare `id` these single-entity tools
+    # expect. Accept either; reject only when both are set with conflicting values.
+    if primary is not None and alias is not None and primary != alias:
+        raise ValueError(
+            f"Conflicting values for 'id' ({primary}) and '{alias_name}' ({alias})"
+        )
+    return primary if primary is not None else alias
+
+
 # ---------------------------------------------------------------------------
 # Shared DB functions (used by both MCP tools and REST endpoints)
 # ---------------------------------------------------------------------------
@@ -855,7 +866,8 @@ async def list_knowledge(
 
 @mcp.tool()
 async def update_knowledge(
-    id: int,
+    id: int | None = None,
+    knowledge_id: int | None = None,
     title: str | None = None,
     content: str | None = None,
     category: str | None = None,
@@ -869,13 +881,20 @@ async def update_knowledge(
     so semantic search stays current.
 
     Args:
-        id: Knowledge entry ID
+        id: Knowledge entry ID (alias: knowledge_id)
+        knowledge_id: Alias for id
         title: New title
         content: New content
         category: New category
         url: New URL
         tags: New tags list
     """
+    try:
+        entry_id = _resolve_id(id, knowledge_id, "knowledge_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if entry_id is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'knowledge_id')"})
     app = _get_app_ctx(ctx)
     fields = {}
     if title is not None: fields["title"] = title
@@ -883,9 +902,9 @@ async def update_knowledge(
     if category is not None: fields["category"] = category
     if url is not None: fields["url"] = url
     if tags is not None: fields["tags"] = tags
-    result = await _db_update_knowledge(app.pool, id, **fields)
+    result = await _db_update_knowledge(app.pool, entry_id, **fields)
     if result is None:
-        return json.dumps({"error": f"Knowledge entry {id} not found or no fields to update"})
+        return json.dumps({"error": f"Knowledge entry {entry_id} not found or no fields to update"})
     return json.dumps(result, default=str, indent=2)
 
 
@@ -1199,14 +1218,22 @@ async def list_memories(
 
 @mcp.tool()
 async def archive_knowledge(
-    id: int,
+    id: int | None = None,
+    knowledge_id: int | None = None,
     ctx: Context = None,
 ) -> str:
     """Archive a knowledge entry. Sets it and all its project links to archived.
 
     Args:
-        id: Knowledge entry ID
+        id: Knowledge entry ID (alias: knowledge_id)
+        knowledge_id: Alias for id
     """
+    try:
+        entry_id = _resolve_id(id, knowledge_id, "knowledge_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if entry_id is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'knowledge_id')"})
     app = _get_app_ctx(ctx)
     async with app.pool.acquire() as conn:
         async with conn.transaction():
@@ -1214,28 +1241,36 @@ async def archive_knowledge(
                 """UPDATE knowledge SET status = 'archived', updated_at = NOW()
                    WHERE id = $1 AND status = 'active'
                    RETURNING id, title, status""",
-                id,
+                entry_id,
             )
             if row is None:
-                return json.dumps({"error": f"Knowledge entry {id} not found or already archived"})
+                return json.dumps({"error": f"Knowledge entry {entry_id} not found or already archived"})
             await conn.execute(
                 """UPDATE project_links SET status = 'archived', archived_at = NOW()
                    WHERE knowledge_id = $1 AND status = 'active'""",
-                id,
+                entry_id,
             )
     return _format_rows([row])
 
 
 @mcp.tool()
 async def archive_memory(
-    id: int,
+    id: int | None = None,
+    memory_id: int | None = None,
     ctx: Context = None,
 ) -> str:
     """Archive a memory. Sets it and all its project links to archived.
 
     Args:
-        id: Memory ID
+        id: Memory ID (alias: memory_id)
+        memory_id: Alias for id
     """
+    try:
+        entry_id = _resolve_id(id, memory_id, "memory_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if entry_id is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'memory_id')"})
     app = _get_app_ctx(ctx)
     async with app.pool.acquire() as conn:
         async with conn.transaction():
@@ -1243,14 +1278,14 @@ async def archive_memory(
                 """UPDATE memories SET status = 'archived', updated_at = NOW()
                    WHERE id = $1 AND status = 'active'
                    RETURNING id, name, status""",
-                id,
+                entry_id,
             )
             if row is None:
-                return json.dumps({"error": f"Memory {id} not found or already archived"})
+                return json.dumps({"error": f"Memory {entry_id} not found or already archived"})
             await conn.execute(
                 """UPDATE project_links SET status = 'archived', archived_at = NOW()
                    WHERE memory_id = $1 AND status = 'active'""",
-                id,
+                entry_id,
             )
     return _format_rows([row])
 
@@ -1281,47 +1316,63 @@ async def archive_project(
 
 @mcp.tool()
 async def unarchive_knowledge(
-    id: int,
+    id: int | None = None,
+    knowledge_id: int | None = None,
     ctx: Context = None,
 ) -> str:
     """Restore an archived knowledge entry to active. Project links are NOT
     automatically restored — use link_to_project to re-associate.
 
     Args:
-        id: Knowledge entry ID
+        id: Knowledge entry ID (alias: knowledge_id)
+        knowledge_id: Alias for id
     """
+    try:
+        entry_id = _resolve_id(id, knowledge_id, "knowledge_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if entry_id is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'knowledge_id')"})
     app = _get_app_ctx(ctx)
     row = await app.pool.fetchrow(
         """UPDATE knowledge SET status = 'active', updated_at = NOW()
            WHERE id = $1 AND status = 'archived'
            RETURNING id, title, status""",
-        id,
+        entry_id,
     )
     if row is None:
-        return json.dumps({"error": f"Knowledge entry {id} not found or not archived"})
+        return json.dumps({"error": f"Knowledge entry {entry_id} not found or not archived"})
     return _format_rows([row])
 
 
 @mcp.tool()
 async def unarchive_memory(
-    id: int,
+    id: int | None = None,
+    memory_id: int | None = None,
     ctx: Context = None,
 ) -> str:
     """Restore an archived memory to active. Project links are NOT
     automatically restored — use link_to_project to re-associate.
 
     Args:
-        id: Memory ID
+        id: Memory ID (alias: memory_id)
+        memory_id: Alias for id
     """
+    try:
+        entry_id = _resolve_id(id, memory_id, "memory_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if entry_id is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'memory_id')"})
     app = _get_app_ctx(ctx)
     row = await app.pool.fetchrow(
         """UPDATE memories SET status = 'active', updated_at = NOW()
            WHERE id = $1 AND status = 'archived'
            RETURNING id, name, status""",
-        id,
+        entry_id,
     )
     if row is None:
-        return json.dumps({"error": f"Memory {id} not found or not archived"})
+        return json.dumps({"error": f"Memory {entry_id} not found or not archived"})
     return _format_rows([row])
 
 
