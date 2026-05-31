@@ -12,12 +12,30 @@ from mcp.server.fastmcp import FastMCP, Context
 import sentry_sdk
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+
+
+def _filter_shutdown_asgi_noise(event, hint):
+    # SIGTERM cancels in-flight streamable-HTTP SSE generators during container
+    # restart; uvicorn logs the resulting protocol mismatch at ERROR level on
+    # newer versions, which Sentry then reports. Harmless — FastMCP's
+    # stateless_http mode does not expose a session-drain hook.
+    logentry = event.get("logentry") or {}
+    if (
+        event.get("logger") == "uvicorn.error"
+        and "ASGI callable returned without completing response"
+            in (logentry.get("message") or "")
+    ):
+        return None
+    return event
+
+
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         traces_sample_rate=0.1,
         environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
         release=os.environ.get("SENTRY_RELEASE", "openbrain@0.1.0"),
+        before_send=_filter_shutdown_asgi_noise,
     )
     sentry_sdk.set_tag("service", "mcp-gateway")
 
