@@ -1,6 +1,13 @@
-mcp[http]
-asyncpg
-httpx
-sentry-sdk[starlette]
-starlette
-uvicorn
+# Pinned 2026-08-11 to the versions from the last known-good container.
+# The 89c3b44 deploy rebuilt unpinned and pulled mcp 2.0.0, which removed
+# mcp.server.fastmcp -> server.py died with ModuleNotFoundError and the
+# container crash-looped.
+#
+# Before bumping any of these, capture a rollback reference first:
+#   docker compose exec mcp-gateway pip freeze > mcp-gateway-pins-known-good.txt
+mcp[http]==1.27.0
+asyncpg==0.31.0
+httpx==0.28.1
+sentry-sdk[starlette]==2.58.0
+starlette==1.0.0
+uvicorn==0.46.0

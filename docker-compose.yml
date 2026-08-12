@@ -29,9 +29,6 @@ services:
       PGRST_SERVER_PORT: 3000
     ports:
       - "3006:3000"
-    networks:
-      - default
-      - nginxproxymanager_default
     depends_on:
       db:
         condition: service_healthy
@@ -41,9 +38,6 @@ services:
     restart: unless-stopped
     ports:
       - "3008:8080"
-    networks:
-      - default
-      - nginxproxymanager_default
     depends_on:
       db:
         condition: service_healthy
@@ -66,9 +60,6 @@ services:
       - ./init.sql:/app/init.sql:ro
     ports:
       - "3007:3001"
-    networks:
-      - default
-      - nginxproxymanager_default
     depends_on:
       db:
         condition: service_healthy
@@ -97,9 +88,6 @@ services:
       - "3010:80"
     environment:
       SENTRY_DSN: ${SENTRY_DSN:-}
-    networks:
-      - default
-      - nginxproxymanager_default
     depends_on:
       - postgrest
       - mcp-gateway
@@ -109,12 +97,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./docs:/usr/share/nginx/html:ro
-    networks:
-      - nginxproxymanager_default
-
-networks:
-  nginxproxymanager_default:
-    external: true
+    ports:
+      - "3009:80"
 
 volumes:
   pgdata:

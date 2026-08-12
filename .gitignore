@@ -1,4 +1,7 @@
 .env
+docker-compose.override.yml
+mcp-gateway-pins-known-good*.txt
+requirements.txt.unpinned-bak
 .worktrees/
 .superpowers/
 *.dump
