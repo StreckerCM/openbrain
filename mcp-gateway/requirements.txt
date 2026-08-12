@@ -3,6 +3,11 @@
 # mcp.server.fastmcp -> server.py died with ModuleNotFoundError and the
 # container crash-looped.
 #
+# Transitive deps are pinned separately in constraints.txt, which the
+# Dockerfile applies via `pip install -r requirements.txt -c constraints.txt`.
+# Bumping a version here means regenerating constraints.txt too, otherwise
+# pip fails loudly on the conflict rather than resolving something untested.
+#
 # Before bumping any of these, capture a rollback reference first:
 #   docker compose exec mcp-gateway pip freeze > mcp-gateway-pins-known-good.txt
 mcp[http]==1.27.0
