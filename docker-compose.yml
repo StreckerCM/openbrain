@@ -97,6 +97,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./docs:/usr/share/nginx/html:ro
+    ports:
+      - "3009:80"
 
 volumes:
   pgdata:
