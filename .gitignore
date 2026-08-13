@@ -6,5 +6,12 @@ mcp-gateway-pins-known-good*.txt
 requirements.txt.unpinned-bak
 .worktrees/
 .superpowers/
+
+# Working exports staged for review before being pushed back to the
+# knowledge base via update_knowledge. The database is the source of
+# truth, so committing these would duplicate it and drift. They also
+# contain third-party licensed material (OWSG toolgroup parameters, SPE
+# paper equations) that should not land in a public repo.
+knowledge-review/
 *.dump
 *.png
