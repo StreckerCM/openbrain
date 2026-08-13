@@ -6,7 +6,7 @@
         "-y",
         "supergateway",
         "--streamableHttp",
-        "https://brain.streckercm.com/mcp/"
+        "https://brain.streckercm.com/mcp"
       ],
       "env": {
         "PATH": "C:\\nvm4w\\nodejs;${PATH}"
