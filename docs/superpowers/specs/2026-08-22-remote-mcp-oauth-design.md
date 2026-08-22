@@ -378,9 +378,15 @@ MCP_STATIC_TOKENS=
 # CT 115 tailnet address. Every service except the tunnel binds here.
 PRIVATE_BIND=100.x.y.z
 
-# Cloudflare Tunnel credential for the cloudflared sidecar
-CLOUDFLARE_TUNNEL_TOKEN=
+# Path on the host to the tunnel credentials JSON from
+# `cloudflared tunnel create`. Kept outside the repository.
+CLOUDFLARED_CREDENTIALS_FILE=/etc/cloudflared/openbrain-mcp.json
 ```
+
+A locally-managed tunnel is used rather than a dashboard-managed one with a connector
+token, so the ingress rules — the definition of the public surface — live in
+`cloudflared/config.yml` under version control and are reviewable in a diff, rather than
+in a web UI where a change leaves no trace.
 
 ## 8. Dependencies
 
