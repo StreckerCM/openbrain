@@ -2139,3 +2139,112 @@ order, after Tasks 1–10 are merged and the local suite passes.
       and Claude Code with a static token.
 - [ ] **After a week (spec §9 test 26)** — review WAF matches and enable blocking only for
       rules that produced no false positives on knowledge-base payloads.
+
+---
+
+## Follow-on Work: extract `db.py` and collapse MCP/REST duplication
+
+**Not part of this plan.** Recorded here because this plan introduces the first pytest
+harness `mcp-gateway` has ever had, which is the prerequisite that makes the work below
+safe. Do not fold it into the auth tasks — the auth change touches ~30 lines of
+`server.py` plus one new file, and mixing a 2,000-line refactor into a security change
+makes the security change unreviewable.
+
+### Why
+
+`server.py` is 2,100 lines in five clean bands:
+
+| Lines | Band | Size |
+|---|---|---|
+| 1–176 | Bootstrap, config, `AppContext`, schema apply | 176 |
+| 177–724 | `_db_*` data layer, 14 functions | 548 |
+| 725–1528 | 19 `@mcp.tool()` definitions | 804 |
+| 1529–1959 | 18 REST handlers | 431 |
+| 1960–2100 | Composition and lifespan | 141 |
+
+Size is not the problem. The problem is that the two front doors do not share a spine.
+Raw SQL call sites per band: data layer **55**, MCP tools **32**, REST handlers **6**.
+REST delegates to `_db_*`; the MCP tools mostly reimplement it inline. All 14 `_db_*`
+functions are called by REST, but only 4 by any MCP tool.
+
+The data layer is already nearly decoupled — every `_db_*` takes `pool` as a parameter
+and references only two module globals (`ORPHAN_POLICY`, `get_embedding`), so extraction
+is close to a pure move.
+
+### Divergence audit, 2026-08-22
+
+Every MCP tool was compared against its REST counterpart.
+
+**Confirmed defect — `add_project` on a duplicate name.** `projects.name` is the only
+`UNIQUE` column in the schema (`init.sql:22`). `rest_projects_create` (`server.py:1681`)
+catches `asyncpg.UniqueViolationError` and returns `409 Project 'X' already exists`. The
+MCP tool `add_project` (`server.py:933`) does not catch it, so an agent registering a
+project that already exists gets an unhandled database exception instead of the clean
+`{"error": ...}` every other path in that tool returns — and it generates Sentry noise.
+Fix: catch `UniqueViolationError` in `add_project`, or move the insert behind a
+`_db_add_project` that both callers share.
+
+**Dead defensive code.** `rest_knowledge_create` (`server.py:1581`) and
+`rest_memories_create` (`server.py:1630`) also catch `UniqueViolationError`, but neither
+`knowledge` nor `memories` has a unique constraint — confirmed against `init.sql` and
+`migrate.sql`. Those handlers cannot fire. They are the copy-paste fingerprint of the
+same problem, pointing the other way.
+
+**Pure duplication, no behavioral difference found:**
+
+| Operation | MCP | REST | Notes |
+|---|---|---|---|
+| archive knowledge / memory | inline, `server.py:1238`, `:1275` | `_db_archive`, `:367` | Same UPDATE plus the same `project_links` cascade |
+| unarchive knowledge / memory | inline, `:1336`, `:1367` | `_db_unarchive`, `:396` | Both correctly skip the link cascade; the asymmetry is intentional and documented |
+| unarchive project | inline, `:1398` | inline, `:1763` | Neither uses a helper — two inline copies of identical SQL |
+| link to project | inline, `:1424` | `_db_link`, `:414` | Byte-identical SQL; differ only in error representation |
+| unlink from project | inline, `:1485` | `_db_unlink`, `:464` | Byte-identical SQL |
+| create project | inline, `:933` | inline, `:1660` | Identical INSERT; see the defect above |
+| update project | inline, `:1021` | inline, `:1685` | Byte-identical dynamic UPDATE builder, ~30 lines each |
+| search | `search_knowledge` `:773`, `recall_memory` `:1107` | `_db_search`, `:497` | Parallel implementations of vector-then-`ILIKE`-fallback, ~130 lines total |
+
+**Capability differences that are probably intentional, not defects.** The MCP search
+tools accept `project`, `category`, `memory_type`, `include_archived`, and a `limit`
+defaulting to 10. `_db_search` hardcodes `LIMIT 20` per type and `status = 'active'`, and
+adds a `mode="exact"` switch the MCP tools lack. Decide deliberately whether these should
+converge when consolidating rather than picking one side by accident.
+
+Search is where a future divergence would hurt most. A drift in ranking or fallback there
+does not raise an error — it quietly returns worse results on one of the two paths, which
+is the kind of regression nobody notices.
+
+### Adjacent finding, not a divergence
+
+`_db_save_memory` (`server.py:264`) is a plain `INSERT` with no upsert, and `memories.name`
+has no unique constraint. Calling `save_memory` twice with the same name creates two rows
+rather than updating one. Both front doors behave identically, so it is not a divergence —
+but duplicate memories dilute search results, which feeds the recall risk in the spec.
+Worth a decision: upsert on `(name, project)`, or leave duplicates and dedupe at read time.
+
+### Suggested sequence
+
+1. **Extract `db.py`** — pure move of lines 177–724. Verify by imports resolving and
+   existing behavior being untouched. No logic changes in this step.
+2. **Fix the `add_project` defect**, with a regression test. Small and independent; can be
+   done before or after step 1.
+3. **Migrate the MCP tools' 32 raw SQL sites onto `db.py`**, one group at a time, in this
+   order — cheapest and safest first: link/unlink, then archive/unarchive, then project
+   create/update, then search. Write characterization tests against current behavior
+   *before* each move, so the tests describe what the code does today rather than what the
+   refactor makes it do.
+4. **Split `tools.py` and `rest.py`** only if still wanted. By then `server.py` is roughly
+   500 lines and this step is cosmetic.
+
+Circular-import gotcha for step 4: `tools.py` needs the `mcp` FastMCP instance to
+decorate against, and `server.py` needs `tools` imported for registration to happen.
+Define `mcp` in a small `core.py` that both import, and have `server.py` import `tools`
+for the side effect.
+
+### Root cause worth remembering
+
+This duplication is the expected failure mode of subagent-driven development: an agent
+given one task writes the code that task needs and does not reliably discover that
+`_db_archive` already exists three hundred lines up. The mitigation is not more careful
+prompting — it is having the shared layer be a separate importable module with an obvious
+name, so reuse is the path of least resistance rather than a discovery problem. That is
+the strongest argument for step 1, ahead of any file-size concern.
