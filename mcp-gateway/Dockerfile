@@ -3,6 +3,6 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
-COPY server.py .
-EXPOSE 3001
+COPY server.py auth.py .
+EXPOSE 3001 3002
 CMD ["python", "server.py"]

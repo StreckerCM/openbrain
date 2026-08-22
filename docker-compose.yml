@@ -60,6 +60,7 @@ services:
       - ./init.sql:/app/init.sql:ro
     ports:
       - "${PRIVATE_BIND:-127.0.0.1}:3007:3001"
+      - "${PRIVATE_BIND:-127.0.0.1}:3011:3002"
     depends_on:
       db:
         condition: service_healthy
