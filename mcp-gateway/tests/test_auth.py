@@ -55,3 +55,60 @@ def test_metadata_path_with_resource_suffix_routes_to_metadata_app(listener):
 def test_everything_else_is_404(listener, path):
     resp = TestClient(listener).post(path)
     assert resp.status_code == 404
+
+
+BASE_ENV = {
+    "MCP_AUTH_ENABLED": "true",
+    "MCP_OAUTH_ISSUER": "https://auth.example.com/application/o/openbrain-mcp/",
+    "MCP_OAUTH_JWKS_URL": "https://auth.example.com/application/o/openbrain-mcp/jwks/",
+    "MCP_RESOURCE_URI": "https://openbrain-mcp.example.com/mcp",
+}
+
+
+def test_config_loads_from_env():
+    cfg = auth.AuthConfig.from_env(BASE_ENV)
+    assert cfg.enabled is True
+    assert cfg.issuer == BASE_ENV["MCP_OAUTH_ISSUER"]
+    assert cfg.resource_uri == "https://openbrain-mcp.example.com/mcp"
+    assert cfg.required_scopes == frozenset({"openbrain:read"})
+    assert cfg.static_tokens == frozenset()
+    assert cfg.jwks_cache_ttl == 3600
+
+
+def test_config_defaults_to_enabled():
+    env = {k: v for k, v in BASE_ENV.items() if k != "MCP_AUTH_ENABLED"}
+    assert auth.AuthConfig.from_env(env).enabled is True
+
+
+@pytest.mark.parametrize("missing", [
+    "MCP_OAUTH_ISSUER",
+    "MCP_OAUTH_JWKS_URL",
+    "MCP_RESOURCE_URI",
+])
+def test_enabled_with_missing_setting_raises(missing):
+    env = {k: v for k, v in BASE_ENV.items() if k != missing}
+    with pytest.raises(auth.AuthConfigError) as exc:
+        auth.AuthConfig.from_env(env)
+    assert missing in str(exc.value)
+
+
+def test_disabled_does_not_require_settings():
+    cfg = auth.AuthConfig.from_env({"MCP_AUTH_ENABLED": "false"})
+    assert cfg.enabled is False
+
+
+def test_static_tokens_are_split_and_stripped():
+    env = dict(BASE_ENV, MCP_STATIC_TOKENS=" tok-a , tok-b ,, ")
+    assert auth.AuthConfig.from_env(env).static_tokens == frozenset({"tok-a", "tok-b"})
+
+
+def test_required_scopes_are_split():
+    env = dict(BASE_ENV, MCP_REQUIRED_SCOPES="openbrain:read openbrain:write")
+    assert auth.AuthConfig.from_env(env).required_scopes == auth.ALL_SCOPES
+
+
+def test_metadata_url_is_derived_from_resource_uri():
+    cfg = auth.AuthConfig.from_env(BASE_ENV)
+    assert cfg.metadata_url == (
+        "https://openbrain-mcp.example.com/.well-known/oauth-protected-resource"
+    )

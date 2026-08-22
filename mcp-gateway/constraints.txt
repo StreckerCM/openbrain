@@ -27,7 +27,7 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 httpx-sse==0.4.3
-idna==3.18
+idna==3.19
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 mcp==1.27.0
@@ -35,15 +35,15 @@ pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.15.0
 pydantic_core==2.46.4
-PyJWT==2.13.0
-python-dotenv==1.2.2
+PyJWT==2.12.1
+python-dotenv==1.2.3
 python-multipart==0.0.32
 referencing==0.37.0
 rpds-py==2026.6.3
 sentry-sdk==2.58.0
 sse-starlette==3.4.8
 starlette==1.0.0
-typing-inspection==0.4.3
+typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.46.0

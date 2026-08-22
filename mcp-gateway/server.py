@@ -2080,6 +2080,8 @@ rest_app = Starlette(
 
 import auth
 
+AUTH_CONFIG = auth.AuthConfig.from_env()
+
 
 async def _placeholder_metadata(scope, receive, send):
     """Replaced with the real RFC 9728 document in Task 4."""
