@@ -1,5 +1,6 @@
 import json
 
+import jwt
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -359,3 +360,103 @@ async def test_ttl_expiry_refetch_is_rate_limited_during_outage(jwks_server):
     key = await cache.get_key(KID)
     assert key.key_id == KID
     assert jwks_server.calls == 3
+
+
+import time as _time
+
+from conftest import ISSUER, RESOURCE
+
+JWT_ENV = dict(
+    BASE_ENV,
+    MCP_OAUTH_ISSUER=ISSUER,
+    MCP_OAUTH_JWKS_URL=JWKS_URL,
+    MCP_RESOURCE_URI=RESOURCE,
+)
+
+
+@pytest.fixture
+def jwt_config():
+    return auth.AuthConfig.from_env(JWT_ENV)
+
+
+@pytest.fixture
+def jwks(jwks_server):
+    return auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
+
+
+async def test_valid_token_yields_principal(jwt_config, jwks, mint_token):
+    principal = await auth.validate_jwt(mint_token(), jwt_config, jwks)
+    assert principal.subject == "user-1"
+    assert principal.method == "oauth"
+    assert principal.scopes == auth.ALL_SCOPES
+
+
+async def test_wrong_audience_rejected(jwt_config, jwks, mint_token):
+    token = mint_token(aud="https://someone-elses-server.example.com/mcp")
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+async def test_audience_as_list_containing_resource_accepted(jwt_config, jwks, mint_token):
+    token = mint_token(aud=["https://other.example.com", RESOURCE])
+    principal = await auth.validate_jwt(token, jwt_config, jwks)
+    assert principal.subject == "user-1"
+
+
+async def test_missing_audience_rejected(jwt_config, jwks, mint_token):
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(mint_token(aud=None), jwt_config, jwks)
+
+
+async def test_wrong_issuer_rejected(jwt_config, jwks, mint_token):
+    token = mint_token(iss="https://evil.example.com/application/o/openbrain-mcp/")
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+async def test_issuer_trailing_slash_difference_rejected(jwt_config, jwks, mint_token):
+    # The spec forbids normalizing before comparison. A near-miss is a miss.
+    token = mint_token(iss=ISSUER.rstrip("/"))
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+async def test_expired_token_rejected(jwt_config, jwks, mint_token):
+    now = int(_time.time())
+    token = mint_token(exp=now - 600, iat=now - 900)
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+async def test_token_signed_by_unknown_key_rejected(
+    jwt_config, jwks, mint_token, foreign_key
+):
+    token = mint_token(key=foreign_key, kid=KID)
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+async def test_garbage_token_rejected(jwt_config, jwks):
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt("not-a-jwt", jwt_config, jwks)
+
+
+async def test_unsigned_token_rejected(jwt_config, jwks):
+    # alg=none must never be honoured. PyJWT requires key=None to encode it.
+    token = jwt.encode(
+        {"sub": "x", "aud": RESOURCE, "iss": ISSUER}, key=None, algorithm="none"
+    )
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+def test_extract_scopes_from_space_delimited_string():
+    assert auth.extract_scopes({"scope": "a b"}) == frozenset({"a", "b"})
+
+
+def test_extract_scopes_from_scp_list():
+    assert auth.extract_scopes({"scp": ["a", "b"]}) == frozenset({"a", "b"})
+
+
+def test_extract_scopes_when_absent():
+    assert auth.extract_scopes({}) == frozenset()

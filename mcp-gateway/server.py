@@ -2082,14 +2082,19 @@ import auth
 
 AUTH_CONFIG = auth.AuthConfig.from_env()
 
+JWKS_CACHE = auth.JWKSCache(
+    AUTH_CONFIG.jwks_url,
+    _get_http,
+    ttl=AUTH_CONFIG.jwks_cache_ttl,
+)
+
 
 async def _authenticate(authorization, config):
     token = auth.bearer_token(authorization, config)
     principal = auth.match_static_token(token, config)
     if principal is not None:
         return principal
-    # JWT validation arrives in Tasks 6-8.
-    raise auth.Unauthorized("credential not recognized", config)
+    return await auth.validate_jwt(token, config, JWKS_CACHE)
 
 
 mcp_listener_app = auth.make_mcp_listener(

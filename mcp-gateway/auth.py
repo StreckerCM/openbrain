@@ -203,6 +203,53 @@ class JWKSCache:
         raise JWKSUnavailable(f"no signing key for kid={kid!r}")
 
 
+def extract_scopes(claims: dict) -> frozenset[str]:
+    """Authentik emits a space-delimited `scope` string; some servers emit
+    an `scp` array. Accept either."""
+    raw = claims.get("scope") or claims.get("scp") or ""
+    if isinstance(raw, str):
+        return frozenset(raw.split())
+    return frozenset(raw)
+
+
+async def validate_jwt(token: str, config: AuthConfig, jwks: JWKSCache) -> Principal:
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError as exc:
+        raise Unauthorized(f"malformed token: {exc}", config) from exc
+
+    kid = header.get("kid")
+    if not kid:
+        raise Unauthorized("token header has no kid", config)
+
+    # A failure to resolve the key is JWKSUnavailable, which the middleware
+    # renders as 503. Do not convert it to 401 here.
+    signing_key = await jwks.get_key(kid)
+
+    try:
+        claims = jwt.decode(
+            token,
+            key=signing_key.key,
+            algorithms=["RS256"],
+            audience=config.resource_uri,
+            issuer=config.issuer,
+            leeway=30,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+    except jwt.PyJWTError as exc:
+        # Covers bad signature, wrong audience, wrong issuer, expiry, and
+        # missing required claims. The client gets one undifferentiated
+        # 401; the detail goes to the log, not the response.
+        print(f"[auth] token rejected: {exc}", flush=True)
+        raise Unauthorized("token rejected", config) from exc
+
+    return Principal(
+        subject=str(claims["sub"]),
+        scopes=extract_scopes(claims),
+        method="oauth",
+    )
+
+
 def resource_metadata_document(config: AuthConfig) -> dict:
     return {
         "resource": config.resource_uri,
