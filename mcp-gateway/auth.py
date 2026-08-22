@@ -216,11 +216,15 @@ async def validate_jwt(token: str, config: AuthConfig, jwks: JWKSCache) -> Princ
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError as exc:
-        raise Unauthorized(f"malformed token: {exc}", config) from exc
+        # The client gets one undifferentiated 401; the detail goes to the
+        # log, not the response.
+        print(f"[auth] token rejected: malformed token: {exc}", flush=True)
+        raise Unauthorized("token rejected", config) from exc
 
     kid = header.get("kid")
     if not kid:
-        raise Unauthorized("token header has no kid", config)
+        print("[auth] token rejected: token header has no kid", flush=True)
+        raise Unauthorized("token rejected", config)
 
     # A failure to resolve the key is JWKSUnavailable, which the middleware
     # renders as 503. Do not convert it to 401 here.

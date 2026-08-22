@@ -1,7 +1,11 @@
+import base64
+import hashlib
+import hmac
 import json
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -443,9 +447,56 @@ async def test_garbage_token_rejected(jwt_config, jwks):
 
 async def test_unsigned_token_rejected(jwt_config, jwks):
     # alg=none must never be honoured. PyJWT requires key=None to encode it.
+    # A kid is required so the token reaches jwt.decode() -- otherwise this
+    # test would only prove the kid guard works, not the algorithm allowlist.
     token = jwt.encode(
-        {"sub": "x", "aud": RESOURCE, "iss": ISSUER}, key=None, algorithm="none"
+        {"sub": "x", "aud": RESOURCE, "iss": ISSUER},
+        key=None,
+        algorithm="none",
+        headers={"kid": KID},
     )
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+async def test_algorithm_confusion_hs256_with_public_key_rejected(
+    jwt_config, jwks, signing_key
+):
+    """Classic RS256-to-HS256 confusion: sign with HS256 using the RSA
+    public key's PEM bytes as the HMAC secret. An attacker can obtain the
+    public key from the JWKS document, so if `algorithms` were ever
+    derived from the token header instead of hardcoded to ["RS256"], this
+    forged token would validate.
+
+    PyJWT's own encoder refuses to build this token (it detects a
+    PEM-shaped HMAC key and raises), so the forgery is assembled by hand
+    to exercise the server's allowlist rather than the client library's
+    unrelated guard.
+    """
+    public_pem = signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    now = int(_time.time())
+    header = {"alg": "HS256", "typ": "JWT", "kid": KID}
+    payload = {
+        "sub": "user-1",
+        "aud": RESOURCE,
+        "iss": ISSUER,
+        "iat": now,
+        "exp": now + 300,
+    }
+    signing_input = (
+        f"{_b64url(json.dumps(header).encode())}."
+        f"{_b64url(json.dumps(payload).encode())}"
+    )
+    signature = hmac.new(public_pem, signing_input.encode(), hashlib.sha256).digest()
+    token = f"{signing_input}.{_b64url(signature)}"
+
     with pytest.raises(auth.Unauthorized):
         await auth.validate_jwt(token, jwt_config, jwks)
 

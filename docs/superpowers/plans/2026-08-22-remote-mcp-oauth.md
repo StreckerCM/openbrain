@@ -1666,9 +1666,56 @@ async def test_garbage_token_rejected(jwt_config, jwks):
 
 async def test_unsigned_token_rejected(jwt_config, jwks):
     # alg=none must never be honoured. PyJWT requires key=None to encode it.
+    # A kid is required so the token reaches jwt.decode() -- otherwise this
+    # test would only prove the kid guard works, not the algorithm allowlist.
     token = jwt.encode(
-        {"sub": "x", "aud": RESOURCE, "iss": ISSUER}, key=None, algorithm="none"
+        {"sub": "x", "aud": RESOURCE, "iss": ISSUER},
+        key=None,
+        algorithm="none",
+        headers={"kid": KID},
     )
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+async def test_algorithm_confusion_hs256_with_public_key_rejected(
+    jwt_config, jwks, signing_key
+):
+    """Classic RS256-to-HS256 confusion: sign with HS256 using the RSA
+    public key's PEM bytes as the HMAC secret. An attacker can obtain the
+    public key from the JWKS document, so if `algorithms` were ever
+    derived from the token header instead of hardcoded to ["RS256"], this
+    forged token would validate.
+
+    PyJWT's own encoder refuses to build this token (it detects a
+    PEM-shaped HMAC key and raises), so the forgery is assembled by hand
+    to exercise the server's allowlist rather than the client library's
+    unrelated guard.
+    """
+    public_pem = signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    now = int(_time.time())
+    header = {"alg": "HS256", "typ": "JWT", "kid": KID}
+    payload = {
+        "sub": "user-1",
+        "aud": RESOURCE,
+        "iss": ISSUER,
+        "iat": now,
+        "exp": now + 300,
+    }
+    signing_input = (
+        f"{_b64url(json.dumps(header).encode())}."
+        f"{_b64url(json.dumps(payload).encode())}"
+    )
+    signature = hmac.new(public_pem, signing_input.encode(), hashlib.sha256).digest()
+    token = f"{signing_input}.{_b64url(signature)}"
+
     with pytest.raises(auth.Unauthorized):
         await auth.validate_jwt(token, jwt_config, jwks)
 
@@ -1685,7 +1732,11 @@ def test_extract_scopes_when_absent():
     assert auth.extract_scopes({}) == frozenset()
 ```
 
-Add `import jwt` to the top of `tests/test_auth.py`.
+Add `import base64`, `import hashlib`, `import hmac`, `import jwt`, and `from cryptography.hazmat.primitives import serialization` to the top of `tests/test_auth.py` (`json` and `pytest` are already imported there).
+
+The `alg=none` test must carry a `kid` — without one, `validate_jwt` rejects it at the `if not kid` guard before `jwt.decode` ever runs, so the test would pass even if `algorithms` were mistakenly derived from the token header instead of hardcoded. The `alg=HS256`-with-public-key test is the other half of that same regression check: it is the classic RS256-to-HS256 key-confusion attack, and nothing else in the suite exercises it.
+
+Sanity-check both before moving on: temporarily widen `algorithms=["RS256"]` to `algorithms=["RS256", "none", "HS256"]` in `auth.py` and confirm at least the HS256-confusion test breaks (it will raise an unhandled `TypeError` rather than the `Unauthorized` the test expects, because `validate_jwt` always passes the resolved JWKS key object, not raw PEM bytes, to `jwt.decode`). The `alg=none` test may keep passing even under this widening — PyJWT's own `NoneAlgorithm.prepare_key` rejects a non-empty key, and `validate_jwt` always supplies the real resolved signing key, so an unsigned token can never validate through this code path regardless of what the `algorithms` allowlist contains. That is a second, independent line of defense, not a gap in the test. Revert the widening afterwards; do not commit it.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1714,11 +1765,15 @@ async def validate_jwt(token: str, config: AuthConfig, jwks: JWKSCache) -> Princ
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError as exc:
-        raise Unauthorized(f"malformed token: {exc}", config) from exc
+        # The client gets one undifferentiated 401; the detail goes to the
+        # log, not the response.
+        print(f"[auth] token rejected: malformed token: {exc}", flush=True)
+        raise Unauthorized("token rejected", config) from exc
 
     kid = header.get("kid")
     if not kid:
-        raise Unauthorized("token header has no kid", config)
+        print("[auth] token rejected: token header has no kid", flush=True)
+        raise Unauthorized("token rejected", config)
 
     # A failure to resolve the key is JWKSUnavailable, which the middleware
     # renders as 503. Do not convert it to 401 here.
