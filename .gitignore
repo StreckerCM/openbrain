@@ -15,3 +15,6 @@ requirements.txt.unpinned-bak
 knowledge-review/
 *.dump
 *.png
+
+# Local test virtualenv for mcp-gateway
+mcp-gateway/.venv/
