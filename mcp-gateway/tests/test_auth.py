@@ -112,3 +112,31 @@ def test_metadata_url_is_derived_from_resource_uri():
     assert cfg.metadata_url == (
         "https://openbrain-mcp.example.com/.well-known/oauth-protected-resource"
     )
+
+
+def test_from_env_default_reads_os_environ_and_raises_when_unset(monkeypatch):
+    monkeypatch.setenv("MCP_AUTH_ENABLED", "true")
+    for var in ("MCP_OAUTH_ISSUER", "MCP_OAUTH_JWKS_URL", "MCP_RESOURCE_URI"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(auth.AuthConfigError) as exc:
+        auth.AuthConfig.from_env()
+    message = str(exc.value)
+    assert "MCP_OAUTH_ISSUER" in message
+    assert "MCP_OAUTH_JWKS_URL" in message
+    assert "MCP_RESOURCE_URI" in message
+
+
+def test_from_env_default_reads_os_environ_when_set(monkeypatch):
+    monkeypatch.setenv("MCP_AUTH_ENABLED", "true")
+    monkeypatch.setenv("MCP_OAUTH_ISSUER", BASE_ENV["MCP_OAUTH_ISSUER"])
+    monkeypatch.setenv("MCP_OAUTH_JWKS_URL", BASE_ENV["MCP_OAUTH_JWKS_URL"])
+    monkeypatch.setenv("MCP_RESOURCE_URI", BASE_ENV["MCP_RESOURCE_URI"])
+    monkeypatch.delenv("MCP_STATIC_TOKENS", raising=False)
+    monkeypatch.delenv("MCP_REQUIRED_SCOPES", raising=False)
+
+    cfg = auth.AuthConfig.from_env()
+
+    assert cfg.enabled is True
+    assert cfg.issuer == BASE_ENV["MCP_OAUTH_ISSUER"]
+    assert cfg.jwks_url == BASE_ENV["MCP_OAUTH_JWKS_URL"]
+    assert cfg.resource_uri == BASE_ENV["MCP_RESOURCE_URI"]
