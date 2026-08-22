@@ -2092,9 +2092,9 @@ JWKS_CACHE = auth.JWKSCache(
 async def _authenticate(authorization, config):
     token = auth.bearer_token(authorization, config)
     principal = auth.match_static_token(token, config)
-    if principal is not None:
-        return principal
-    return await auth.validate_jwt(token, config, JWKS_CACHE)
+    if principal is None:
+        principal = await auth.validate_jwt(token, config, JWKS_CACHE)
+    return auth.require_scopes(principal, config)
 
 
 mcp_listener_app = auth.make_mcp_listener(

@@ -511,3 +511,42 @@ def test_extract_scopes_from_scp_list():
 
 def test_extract_scopes_when_absent():
     assert auth.extract_scopes({}) == frozenset()
+
+
+def test_principal_with_required_scope_passes(jwt_config):
+    principal = auth.Principal(
+        subject="u", scopes=frozenset({"openbrain:read"}), method="oauth"
+    )
+    assert auth.require_scopes(principal, jwt_config) is principal
+
+
+def test_principal_missing_required_scope_raises(jwt_config):
+    principal = auth.Principal(
+        subject="u", scopes=frozenset({"openbrain:write"}), method="oauth"
+    )
+    with pytest.raises(auth.InsufficientScope) as exc:
+        auth.require_scopes(principal, jwt_config)
+    assert exc.value.needed == frozenset({"openbrain:read"})
+
+
+def test_principal_with_no_scopes_raises(jwt_config):
+    principal = auth.Principal(subject="u", scopes=frozenset(), method="oauth")
+    with pytest.raises(auth.InsufficientScope):
+        auth.require_scopes(principal, jwt_config)
+
+
+def test_only_missing_scopes_are_challenged():
+    cfg = auth.AuthConfig.from_env(
+        dict(JWT_ENV, MCP_REQUIRED_SCOPES="openbrain:read openbrain:write")
+    )
+    principal = auth.Principal(
+        subject="u", scopes=frozenset({"openbrain:read"}), method="oauth"
+    )
+    with pytest.raises(auth.InsufficientScope) as exc:
+        auth.require_scopes(principal, cfg)
+    assert exc.value.needed == frozenset({"openbrain:write"})
+
+
+def test_static_token_principal_satisfies_scopes(static_config):
+    principal = auth.match_static_token("tok-alpha", static_config)
+    assert auth.require_scopes(principal, static_config) is principal

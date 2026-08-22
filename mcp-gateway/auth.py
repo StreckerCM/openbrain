@@ -373,6 +373,17 @@ def match_static_token(token: str, config: AuthConfig) -> Principal | None:
     return Principal(subject="static-token", scopes=ALL_SCOPES, method="static")
 
 
+def require_scopes(principal: Principal, config: AuthConfig) -> Principal:
+    """Challenge with only the scopes actually missing, not the whole
+    required set — the spec asks servers to name what the current
+    operation needs, and a client unions the challenge with what it
+    already holds."""
+    missing = config.required_scopes - principal.scopes
+    if missing:
+        raise InsufficientScope(frozenset(missing), config)
+    return principal
+
+
 def make_mcp_listener(mcp_app, metadata_app):
     """Build the ASGI app served on the public MCP port.
 
