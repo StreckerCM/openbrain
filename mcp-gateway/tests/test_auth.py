@@ -140,3 +140,71 @@ def test_from_env_default_reads_os_environ_when_set(monkeypatch):
     assert cfg.issuer == BASE_ENV["MCP_OAUTH_ISSUER"]
     assert cfg.jwks_url == BASE_ENV["MCP_OAUTH_JWKS_URL"]
     assert cfg.resource_uri == BASE_ENV["MCP_RESOURCE_URI"]
+
+
+@pytest.fixture
+def config():
+    return auth.AuthConfig.from_env(BASE_ENV)
+
+
+def test_metadata_document_shape(config):
+    doc = auth.resource_metadata_document(config)
+    assert doc["resource"] == "https://openbrain-mcp.example.com/mcp"
+    assert doc["authorization_servers"] == [BASE_ENV["MCP_OAUTH_ISSUER"]]
+    assert set(doc["scopes_supported"]) == auth.ALL_SCOPES
+    assert doc["bearer_methods_supported"] == ["header"]
+
+
+def test_metadata_app_serves_the_document_without_auth(config):
+    client = TestClient(auth.make_metadata_app(config))
+    resp = client.get("/.well-known/oauth-protected-resource")
+    assert resp.status_code == 200
+    assert resp.json()["resource"] == "https://openbrain-mcp.example.com/mcp"
+
+
+def test_missing_authorization_returns_401_with_challenge(config):
+    async def deny(authorization, config):
+        raise auth.Unauthorized("no credentials", config)
+
+    guarded = auth.make_auth_middleware(_stub("mcp"), config, deny)
+    resp = TestClient(guarded).post("/mcp")
+
+    assert resp.status_code == 401
+    challenge = resp.headers["www-authenticate"]
+    assert challenge.startswith("Bearer ")
+    assert 'resource_metadata="https://openbrain-mcp.example.com/.well-known/oauth-protected-resource"' in challenge
+    assert 'scope="openbrain:read"' in challenge
+
+
+def test_insufficient_scope_returns_403_with_error(config):
+    async def deny(authorization, config):
+        raise auth.InsufficientScope(frozenset({"openbrain:write"}), config)
+
+    guarded = auth.make_auth_middleware(_stub("mcp"), config, deny)
+    resp = TestClient(guarded).post("/mcp")
+
+    assert resp.status_code == 403
+    challenge = resp.headers["www-authenticate"]
+    assert 'error="insufficient_scope"' in challenge
+    assert 'scope="openbrain:write"' in challenge
+
+
+def test_successful_authentication_passes_through(config):
+    async def allow(authorization, config):
+        return auth.Principal(subject="u1", scopes=auth.ALL_SCOPES, method="test")
+
+    guarded = auth.make_auth_middleware(_stub("mcp"), config, allow)
+    resp = TestClient(guarded).post("/mcp")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"app": "mcp"}
+
+
+def test_auth_disabled_passes_everything_through():
+    cfg = auth.AuthConfig.from_env({"MCP_AUTH_ENABLED": "false"})
+
+    async def deny(authorization, config):
+        raise auth.Unauthorized("should not be called", config)
+
+    guarded = auth.make_auth_middleware(_stub("mcp"), cfg, deny)
+    assert TestClient(guarded).post("/mcp").status_code == 200

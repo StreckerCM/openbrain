@@ -2083,12 +2083,15 @@ import auth
 AUTH_CONFIG = auth.AuthConfig.from_env()
 
 
-async def _placeholder_metadata(scope, receive, send):
-    """Replaced with the real RFC 9728 document in Task 4."""
-    await auth.not_found(scope, receive, send)
+async def _deny_all(authorization, config):
+    """Replaced with real validation in Tasks 5-8."""
+    raise auth.Unauthorized("authentication not yet implemented", config)
 
 
-mcp_listener_app = auth.make_mcp_listener(mcp_asgi, _placeholder_metadata)
+mcp_listener_app = auth.make_mcp_listener(
+    auth.make_auth_middleware(mcp_asgi, AUTH_CONFIG, _deny_all),
+    auth.make_metadata_app(AUTH_CONFIG),
+)
 
 # The API listener keeps the existing Starlette app. It is private-only —
 # see the deployment notes; nothing authenticates these routes.
