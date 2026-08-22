@@ -2083,13 +2083,17 @@ import auth
 AUTH_CONFIG = auth.AuthConfig.from_env()
 
 
-async def _deny_all(authorization, config):
-    """Replaced with real validation in Tasks 5-8."""
-    raise auth.Unauthorized("authentication not yet implemented", config)
+async def _authenticate(authorization, config):
+    token = auth.bearer_token(authorization, config)
+    principal = auth.match_static_token(token, config)
+    if principal is not None:
+        return principal
+    # JWT validation arrives in Tasks 6-8.
+    raise auth.Unauthorized("credential not recognized", config)
 
 
 mcp_listener_app = auth.make_mcp_listener(
-    auth.make_auth_middleware(mcp_asgi, AUTH_CONFIG, _deny_all),
+    auth.make_auth_middleware(mcp_asgi, AUTH_CONFIG, _authenticate),
     auth.make_metadata_app(AUTH_CONFIG),
 )
 

@@ -5,6 +5,7 @@ listener and what it takes to reach it. It is deliberately separate from
 server.py, which holds the 19 MCP tools and the REST API.
 """
 
+import hmac
 import json
 import os
 from collections.abc import Mapping
@@ -218,6 +219,32 @@ async def not_found(scope, receive, send):
         ],
     })
     await send({"type": "http.response.body", "body": body})
+
+
+def bearer_token(authorization: str | None, config: AuthConfig) -> str:
+    """Pull the credential out of an Authorization header, or raise."""
+    if not authorization:
+        raise Unauthorized("missing Authorization header", config)
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not value.strip():
+        raise Unauthorized("expected an Authorization: Bearer credential", config)
+    return value.strip()
+
+
+def match_static_token(token: str, config: AuthConfig) -> Principal | None:
+    """Compare against configured static tokens in constant time.
+
+    Every candidate is checked with no early exit: returning as soon as one
+    matches would leak, through response timing, how far down the list a
+    guess got. A plain `==` would leak the shared prefix length outright.
+    """
+    matched = False
+    for candidate in config.static_tokens:
+        if hmac.compare_digest(token, candidate):
+            matched = True
+    if not matched:
+        return None
+    return Principal(subject="static-token", scopes=ALL_SCOPES, method="static")
 
 
 def make_mcp_listener(mcp_app, metadata_app):

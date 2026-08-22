@@ -208,3 +208,45 @@ def test_auth_disabled_passes_everything_through():
 
     guarded = auth.make_auth_middleware(_stub("mcp"), cfg, deny)
     assert TestClient(guarded).post("/mcp").status_code == 200
+
+
+STATIC_ENV = dict(BASE_ENV, MCP_STATIC_TOKENS="tok-alpha,tok-beta")
+
+
+@pytest.fixture
+def static_config():
+    return auth.AuthConfig.from_env(STATIC_ENV)
+
+
+def test_bearer_token_extracted(static_config):
+    assert auth.bearer_token("Bearer tok-alpha", static_config) == "tok-alpha"
+
+
+def test_bearer_token_scheme_is_case_insensitive(static_config):
+    assert auth.bearer_token("bearer tok-alpha", static_config) == "tok-alpha"
+
+
+@pytest.mark.parametrize("header", [None, "", "Basic abc", "tok-alpha", "Bearer"])
+def test_bad_authorization_header_raises_unauthorized(static_config, header):
+    with pytest.raises(auth.Unauthorized):
+        auth.bearer_token(header, static_config)
+
+
+def test_configured_static_token_matches(static_config):
+    principal = auth.match_static_token("tok-beta", static_config)
+    assert principal is not None
+    assert principal.method == "static"
+    assert principal.scopes == auth.ALL_SCOPES
+
+
+def test_unknown_token_does_not_match(static_config):
+    assert auth.match_static_token("tok-unknown", static_config) is None
+
+
+def test_static_tokens_disabled_when_unset(config):
+    assert config.static_tokens == frozenset()
+    assert auth.match_static_token("anything", config) is None
+
+
+def test_empty_token_never_matches_when_disabled(config):
+    assert auth.match_static_token("", config) is None
