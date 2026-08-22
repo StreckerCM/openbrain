@@ -952,12 +952,19 @@ async def add_project(
     if orphan_policy is not None and orphan_policy not in ("archive", "reassign"):
         return json.dumps({"error": "orphan_policy must be 'archive' or 'reassign'"})
     app = _get_app_ctx(ctx)
-    row = await app.pool.fetchrow(
-        """INSERT INTO projects (name, description, repo_url, tech_stack, notes, orphan_policy)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, name, status, orphan_policy, created_at""",
-        name, description, repo_url, tech_stack or [], notes, orphan_policy,
-    )
+    try:
+        row = await app.pool.fetchrow(
+            """INSERT INTO projects (name, description, repo_url, tech_stack, notes, orphan_policy)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               RETURNING id, name, status, orphan_policy, created_at""",
+            name, description, repo_url, tech_stack or [], notes, orphan_policy,
+        )
+    except asyncpg.UniqueViolationError:
+        # projects.name is the schema's only UNIQUE column. Letting this escape
+        # surfaces to the agent as an unhandled error and to Sentry as noise,
+        # unlike every other failure path in this tool. Text matches
+        # rest_projects_create's 409 so both front doors say the same thing.
+        return json.dumps({"error": f"Project '{name}' already exists"})
     return _format_rows([row])
 
 
