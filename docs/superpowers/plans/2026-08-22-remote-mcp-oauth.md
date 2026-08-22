@@ -166,6 +166,12 @@ The gateway currently serves `/mcp` and the unauthenticated write API on one por
   - `auth.make_mcp_listener(mcp_app, metadata_app) -> ASGI app` — routes `/mcp` and `/mcp/*` to `mcp_app`, `/.well-known/oauth-protected-resource*` to `metadata_app`, everything else to `not_found`
   - MCP listener on container port **3001**, API listener on container port **3002**
 
+> **Note (2026-08-22):** `requirements-dev.txt`, `pytest.ini`, `tests/`, and the
+> `__pycache__`/`.venv` gitignore entries already exist on branch
+> `fix/add-project-duplicate-name`. If that branch has merged, Steps 1-3 below are
+> already satisfied — verify the files match and skip to Step 4. If it has not merged,
+> create them here and expect a trivial conflict at merge time.
+
 - [ ] **Step 1: Create the test dependency file**
 
 Create `mcp-gateway/requirements-dev.txt`:
@@ -2223,8 +2229,8 @@ Worth a decision: upsert on `(name, project)`, or leave duplicates and dedupe at
 
 ### To do
 
-- [ ] **A. Fix the `add_project` duplicate-name defect.** Fully independent of everything
-  else — do this first regardless of whether the rest happens. `server.py:933`, after
+- [x] **A. Fix the `add_project` duplicate-name defect.** DONE 2026-08-22 on branch
+  `fix/add-project-duplicate-name`. Fully independent of everything else. `server.py:933`, after
   `app = _get_app_ctx(ctx)`:
 
   ```python
