@@ -8,9 +8,12 @@ server.py, which holds the 19 MCP tools and the REST API.
 import hmac
 import json
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
+
+import jwt
 
 ALL_SCOPES = frozenset({"openbrain:read", "openbrain:write"})
 
@@ -126,6 +129,73 @@ class JWKSUnavailable(Exception):
     """The signing keys could not be fetched and nothing is cached. This is
     a 503, not a 401 — the client's token may be perfectly valid, and
     telling it otherwise sends it into a pointless reauthorization loop."""
+
+
+class JWKSCache:
+    """Fetches and caches the authorization server's signing keys.
+
+    PyJWT ships PyJWKClient, but it fetches over blocking urllib, which
+    would stall the event loop on every cache miss. This uses the
+    httpx.AsyncClient the gateway already holds.
+    """
+
+    def __init__(
+        self,
+        jwks_url: str,
+        http_getter,
+        ttl: int = 3600,
+        min_refetch_interval: int = 30,
+        clock=time.monotonic,
+    ):
+        self._url = jwks_url
+        self._http_getter = http_getter
+        self._ttl = ttl
+        self._min_refetch_interval = min_refetch_interval
+        self._clock = clock
+        self._keys: dict[str, "jwt.PyJWK"] = {}
+        self._fetched_at: float | None = None
+        self._last_attempt: float | None = None
+
+    async def _fetch(self) -> bool:
+        """Refresh the key set. Returns True on success. Never raises for
+        a network or parse failure — the caller decides whether a stale
+        cache is good enough."""
+        self._last_attempt = self._clock()
+        try:
+            response = await self._http_getter().get(self._url, timeout=10.0)
+            response.raise_for_status()
+            key_set = jwt.PyJWKSet.from_dict(response.json())
+        except Exception as exc:  # network, HTTP, JSON, or key parse
+            print(f"[auth] JWKS fetch failed: {exc}", flush=True)
+            return False
+        self._keys = {k.key_id: k for k in key_set.keys if k.key_id}
+        self._fetched_at = self._clock()
+        return True
+
+    def _expired(self) -> bool:
+        return self._fetched_at is None or (
+            self._clock() - self._fetched_at >= self._ttl
+        )
+
+    def _may_refetch(self) -> bool:
+        return self._last_attempt is None or (
+            self._clock() - self._last_attempt >= self._min_refetch_interval
+        )
+
+    async def get_key(self, kid: str) -> "jwt.PyJWK":
+        if self._expired():
+            # A failure here is survivable if we still hold keys.
+            await self._fetch()
+
+        if kid in self._keys:
+            return self._keys[kid]
+
+        # Unknown kid: the AS may have rotated. Refetch once, rate-limited
+        # so junk kids cannot drive unbounded outbound requests.
+        if self._may_refetch() and await self._fetch() and kid in self._keys:
+            return self._keys[kid]
+
+        raise JWKSUnavailable(f"no signing key for kid={kid!r}")
 
 
 def resource_metadata_document(config: AuthConfig) -> dict:

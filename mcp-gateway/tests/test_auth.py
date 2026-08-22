@@ -250,3 +250,85 @@ def test_static_tokens_disabled_when_unset(config):
 
 def test_empty_token_never_matches_when_disabled(config):
     assert auth.match_static_token("", config) is None
+
+
+from conftest import JWKS_URL, KID, OTHER_KID
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+async def test_jwks_fetches_and_returns_key(jwks_server):
+    cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
+    key = await cache.get_key(KID)
+    assert key.key_id == KID
+    assert jwks_server.calls == 1
+
+
+async def test_jwks_is_cached_between_calls(jwks_server):
+    cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
+    await cache.get_key(KID)
+    await cache.get_key(KID)
+    assert jwks_server.calls == 1
+
+
+async def test_jwks_refetches_after_ttl(jwks_server):
+    clock = FakeClock()
+    cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client, ttl=100, clock=clock)
+    await cache.get_key(KID)
+    clock.advance(101)
+    await cache.get_key(KID)
+    assert jwks_server.calls == 2
+
+
+async def test_unknown_kid_triggers_one_refetch(jwks_server, foreign_key):
+    clock = FakeClock()
+    cache = auth.JWKSCache(
+        JWKS_URL, lambda: jwks_server.client, min_refetch_interval=30, clock=clock
+    )
+    await cache.get_key(KID)
+    jwks_server.rotate(foreign_key, OTHER_KID)
+    clock.advance(31)
+    key = await cache.get_key(OTHER_KID)
+    assert key.key_id == OTHER_KID
+    assert jwks_server.calls == 2
+
+
+async def test_unknown_kid_is_rate_limited(jwks_server):
+    clock = FakeClock()
+    cache = auth.JWKSCache(
+        JWKS_URL, lambda: jwks_server.client, min_refetch_interval=30, clock=clock
+    )
+    await cache.get_key(KID)
+    clock.advance(31)  # past the floor, so the first garbage kid may refetch
+    for _ in range(20):
+        with pytest.raises(auth.JWKSUnavailable):
+            await cache.get_key("garbage-kid")
+    # One refetch attempt, not twenty: junk kids must not become an
+    # outbound request amplifier.
+    assert jwks_server.calls == 2
+
+
+async def test_serves_stale_cache_when_fetch_fails(jwks_server):
+    clock = FakeClock()
+    cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client, ttl=100, clock=clock)
+    await cache.get_key(KID)
+    jwks_server.status = 500
+    clock.advance(101)
+    key = await cache.get_key(KID)
+    assert key.key_id == KID
+
+
+async def test_raises_when_fetch_fails_with_cold_cache(jwks_server):
+    jwks_server.status = 500
+    cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
+    with pytest.raises(auth.JWKSUnavailable):
+        await cache.get_key(KID)
