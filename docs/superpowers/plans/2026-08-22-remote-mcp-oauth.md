@@ -1426,6 +1426,33 @@ async def test_raises_when_fetch_fails_with_cold_cache(jwks_server):
     cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
     with pytest.raises(auth.JWKSUnavailable):
         await cache.get_key(KID)
+
+
+async def test_ttl_expiry_refetch_is_rate_limited_during_outage(jwks_server):
+    """A sustained outage past ttl must not turn every get_key call for an
+    already-cached kid into a fresh outbound fetch attempt: the stale key
+    should keep being served, and fetch attempts should stay bounded by
+    min_refetch_interval, not scale with call count."""
+    clock = FakeClock()
+    cache = auth.JWKSCache(
+        JWKS_URL, lambda: jwks_server.client, ttl=100, min_refetch_interval=30, clock=clock
+    )
+    await cache.get_key(KID)
+    jwks_server.status = 500
+    clock.advance(101)  # past ttl; server is down
+    for _ in range(5):
+        key = await cache.get_key(KID)
+        assert key.key_id == KID
+    # One fetch attempt during the outage window despite 5 calls for a
+    # cached kid -- the TTL path must be rate-limited like the unknown-kid
+    # path, not fire on every request.
+    assert jwks_server.calls == 2
+
+    jwks_server.status = 200
+    clock.advance(31)  # past min_refetch_interval: throttle reopens
+    key = await cache.get_key(KID)
+    assert key.key_id == KID
+    assert jwks_server.calls == 3
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -1494,8 +1521,13 @@ class JWKSCache:
         )
 
     async def get_key(self, kid: str) -> "jwt.PyJWK":
-        if self._expired():
-            # A failure here is survivable if we still hold keys.
+        if self._expired() and self._may_refetch():
+            # A failure here is survivable if we still hold keys. Gated by
+            # _may_refetch() too: without it, a sustained outage past ttl
+            # would trigger a fresh 10s-timeout fetch attempt on every
+            # request, stalling requests that already have a valid cached
+            # key -- exactly the amplifier min_refetch_interval exists to
+            # prevent, just reached via the TTL path instead of unknown-kid.
             await self._fetch()
 
         if kid in self._keys:

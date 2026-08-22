@@ -183,8 +183,13 @@ class JWKSCache:
         )
 
     async def get_key(self, kid: str) -> "jwt.PyJWK":
-        if self._expired():
-            # A failure here is survivable if we still hold keys.
+        if self._expired() and self._may_refetch():
+            # A failure here is survivable if we still hold keys. Gated by
+            # _may_refetch() too: without it, a sustained outage past ttl
+            # would trigger a fresh 10s-timeout fetch attempt on every
+            # request, stalling requests that already have a valid cached
+            # key -- exactly the amplifier min_refetch_interval exists to
+            # prevent, just reached via the TTL path instead of unknown-kid.
             await self._fetch()
 
         if kid in self._keys:
