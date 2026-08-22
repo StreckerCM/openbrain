@@ -255,28 +255,84 @@ the audience check is trusted — it is the single most likely integration failu
 Requirement: `https://openbrain-mcp.streckercm.com` reaches the gateway's **MCP listener
 only**.
 
-Recommended realization is a `cloudflared` service inside the compose project, reaching
-`http://mcp-gateway:3001` over the internal docker network. The MCP port then needs no
-host publication at all, and the tunnel has no route to port 3002 to misconfigure.
+### Topology
 
-If the existing public ingress is instead an NPMplus vhost on CT 127, that host reaches
-CT 115 over published ports, so port 3001 must be published on an address CT 127 can
-reach. The listener split still holds — NPMplus points at 3001 and never learns about
-3002.
+This mirrors the pattern already running for `auth.streckercm.com`: Cloudflare Tunnel
+from the public internet, NPMplus for LAN and tailnet clients, one hostname resolved
+differently depending on where you ask.
 
-Per the split-DNS finding, `openbrain-mcp.streckercm.com` must **not** be added to local
-DNS. Keeping it public-only means every client exercises the same path, and it makes the
-off-LAN test in §8 meaningful.
+| Origin | Path |
+|---|---|
+| Public internet | Cloudflare edge → tunnel → `cloudflared` sidecar → `mcp-gateway:3001` |
+| LAN / tailnet | NPMplus on CT 127 → CT 115 tailnet address → published MCP port |
+
+A `cloudflared` service joins the compose project and reaches `http://mcp-gateway:3001`
+over the internal docker network. Its ingress rule permits `/mcp` and
+`/.well-known/oauth-protected-resource*` and nothing else. Port 3002 is not on any
+network cloudflared can route to, so the write API is unreachable from the tunnel by
+construction rather than by rule — the rule is the second line, not the first.
+
+### Split DNS is now safe, and that is a consequence of D1
+
+The earlier Cloudflare Access attempt failed *because* of split DNS: LAN clients resolved
+the hostname to the local address, never traversed the edge, and were never authenticated.
+That failure mode does not exist here. The gateway validates tokens itself, so a request
+arriving via NPMplus on the tailnet faces exactly the same check as one arriving via the
+Cloudflare edge.
+
+This is worth stating plainly because it inverts the earlier guidance in the project's
+notes. `openbrain-mcp.streckercm.com` **may** be added to local DNS. Local clients get a
+direct path with lower latency that keeps working when the internet does not — which for
+a homelab knowledge base is a real benefit, not a micro-optimization.
+
+The safety of this rests entirely on D1. If authentication is ever disabled or bypassed
+on the assumption that "the tunnel protects it," the local path is wide open and nothing
+will signal that. Test 20 in §9 exists to catch precisely that, and is the reason it must
+be run from inside the LAN rather than only from off-network.
+
+### What Cloudflare contributes
+
+Cloudflare is not part of the authentication decision. It still earns its place:
+
+- **No inbound port forward.** The tunnel is an outbound connection from the homelab.
+  There is no listening port on the public interface to find, scan, or forward. This is
+  the single largest security contribution, and it is structural.
+- **DDoS absorption and TLS termination** at the edge, with certificate management.
+- **Rate limiting**, scoped to `/mcp`.
+- **Geo or ASN restriction**, if the set of countries you use agents from is small.
+- **Edge request logging**, independent of the gateway's own logs.
+
+Two settings need care rather than defaults:
+
+**WAF managed rules.** MCP traffic is JSON-RPC in POST bodies. Managed rulesets can
+false-positive on payloads that contain code, SQL fragments, or shell snippets — which is
+routine content for a knowledge base about software. Start in log-only mode, review what
+matches over a week of real use, and enable blocking only for rules that produced no
+false positives. A WAF that silently eats `add_knowledge` calls will look like an
+intermittent client bug.
+
+**Rate limiting thresholds.** An agent working through a task issues tool calls in
+bursts, not at a steady rate. Set the threshold well above anything a single agent
+produces — this is a backstop against automated abuse of a public endpoint, not a quota.
+
+Streamable HTTP may hold long-lived connections. Cloudflare's proxy timeouts and
+buffering behavior for streaming responses need verifying against real MCP traffic rather
+than assumed; see §9 test 25 and the Risks section.
 
 ## 6. Port Binding
 
 Every service currently publishes on `0.0.0.0`. Bind addresses become parameterized so
-the private set can be pinned to loopback or the tailnet address without editing the
-compose file per host.
+the private set can be pinned without editing the compose file per host.
+
+**Both CT 115 and CT 127 join the tailnet**, and `PRIVATE_BIND` becomes CT 115's tailnet
+address. This is the tightest option that still works: NPMplus on CT 127 reaches CT 115
+over the tailnet rather than the LAN, and the web UI becomes reachable from the laptop and
+phone without being public — which is the stated goal for the UI, achieved without any
+ingress at all.
 
 ```yaml
 # .env
-PRIVATE_BIND=127.0.0.1   # or the CT 115 tailnet/LAN address NPMplus reaches
+PRIVATE_BIND=100.x.y.z   # CT 115 tailnet address
 ```
 
 | Port | Service | Binding |
@@ -287,7 +343,12 @@ PRIVATE_BIND=127.0.0.1   # or the CT 115 tailnet/LAN address NPMplus reaches
 | 3009 | docs | `${PRIVATE_BIND}` |
 | 3010 | web-ui | `${PRIVATE_BIND}` |
 | 3011 | mcp-gateway API (3002) | `${PRIVATE_BIND}` |
-| 3007 | mcp-gateway MCP (3001) | Unpublished with a cloudflared sidecar; otherwise `${PRIVATE_BIND}` |
+| 3007 | mcp-gateway MCP (3001) | `${PRIVATE_BIND}` — for the NPMplus local path only. The public path goes through the cloudflared sidecar over the docker network and does not use this port. |
+
+Binding only to the tailnet address means the stack is unreachable locally if tailscaled
+stops. If that tradeoff is unwelcome, docker accepts a second published entry per
+container port, so a LAN address can be added alongside as a fallback. Do not add
+`0.0.0.0` back as the fallback.
 
 Adminer and PostgREST binding all interfaces are worth correcting on their own merits,
 independent of this work — an unauthenticated full-database read and a database admin
@@ -314,8 +375,11 @@ MCP_JWKS_CACHE_TTL=3600
 # Comma-separated tokens for headless agents. Empty disables the static path.
 MCP_STATIC_TOKENS=
 
-# Host interface for services that must not be publicly reachable
-PRIVATE_BIND=127.0.0.1
+# CT 115 tailnet address. Every service except the tunnel binds here.
+PRIVATE_BIND=100.x.y.z
+
+# Cloudflare Tunnel credential for the cloudflared sidecar
+CLOUDFLARE_TUNNEL_TOKEN=
 ```
 
 ## 8. Dependencies
@@ -369,15 +433,24 @@ Post-deploy, against production:
 | # | Case | Expected |
 |---|---|---|
 | 18 | Inspect a real Authentik token's `aud` | Contains `MCP_RESOURCE_URI` — see §4 |
-| 19 | `curl https://openbrain-mcp.streckercm.com/mcp` with no token, **from a phone on cellular** | `401`, not a Cloudflare login page and not a success |
-| 20 | Same, from inside the LAN | `401` — proves enforcement is path-independent |
-| 21 | `https://openbrain-mcp.streckercm.com/api/bulk-delete` | `404` |
-| 22 | Web UI hostname from off-LAN | Unreachable |
-| 23 | claude.ai custom connector, full OAuth flow | Tools usable |
-| 24 | Claude Code via static token | Tools usable |
+| 19 | `curl https://openbrain-mcp.streckercm.com/mcp` with no token, **from a phone on cellular** | `401` with the challenge — not a Cloudflare error page, not a success |
+| 20 | Same, **from inside the LAN** (resolves via NPMplus) | `401` — proves enforcement is path-independent |
+| 21 | Same, **from the tailnet** | `401` |
+| 22 | Valid token over the Cloudflare path, and over the NPMplus path | Both `200`, identical tool list |
+| 23 | `https://openbrain-mcp.streckercm.com/api/bulk-delete`, public path | `404` |
+| 24 | Web UI hostname from off-tailnet, off-LAN | Unreachable |
+| 25 | A long-running streaming MCP response over the Cloudflare path | Completes without truncation or idle timeout |
+| 26 | A tool call whose payload contains code and SQL fragments, WAF in log-only | No block; review what the managed ruleset matched |
+| 27 | claude.ai custom connector, full OAuth flow | Tools usable |
+| 28 | ChatGPT developer-mode connector | Tools usable |
+| 29 | Claude Code via static token | Tools usable |
 
-Test 20 is the one that would have caught the original Cloudflare Access failure. Do not
-skip it because test 19 passed.
+Tests 20 and 21 are the ones that would have caught the original Cloudflare Access
+failure. Do not skip them because 19 passed — 19 passing while 20 fails is exactly the
+shape of the earlier bug, and the whole point of D1 is that both must now return `401`.
+
+Test 25 matters because a truncated stream will present as a flaky client rather than as
+an infrastructure problem, and the two are diagnosed very differently.
 
 ## 10. Migration
 
@@ -402,7 +475,8 @@ file is changing in this work and a silent divergence will re-break networking.
 | `mcp-gateway/server.py` | Auth middleware, JWKS cache, resource metadata routes, listener split, replace catch-all with 404, dual-uvicorn startup |
 | `mcp-gateway/requirements.txt` | Add `pyjwt[crypto]` pinned |
 | `mcp-gateway/constraints.txt` | Regenerate from build-image `pip freeze` |
-| `docker-compose.yml` | `${PRIVATE_BIND}` on private ports, publish API port, optional `cloudflared` service |
+| `docker-compose.yml` | `${PRIVATE_BIND}` on private ports, publish API port, add `cloudflared` service |
+| `cloudflared/config.yml` | New — tunnel ingress restricted to `/mcp` and the metadata paths |
 | `web-ui/nginx.conf` | `/api/write/` and `/api/search` upstreams → `mcp-gateway:3002` |
 | `.env.example` | New variables from §7 |
 | `README.md` | Remote access setup: Authentik provider, client configuration, static tokens |
@@ -421,27 +495,37 @@ file is changing in this work and a silent divergence will re-break networking.
 6. **Authentik provider configuration**, and confirm `aud` on a real token (§4).
 7. **Local end-to-end** — tests 1–17.
 8. **Deploy to CT 115** following §10.
-9. **Public ingress**, then tests 18–22.
-10. **Client configuration** — claude.ai, ChatGPT, Claude Code — then tests 23–24.
+9. **Tailnet enrollment** for CT 115 and CT 127, `PRIVATE_BIND` set, NPMplus vhost
+   repointed at the CT 115 tailnet address. Verify the web UI and the local MCP path.
+10. **cloudflared sidecar and public hostname**, then tests 18–26. WAF stays in log-only
+    mode from here; rate limiting can be enabled immediately.
+11. **Client configuration** — claude.ai, ChatGPT, Claude Code — then tests 27–29.
+12. **WAF review** after a week of real traffic; enable blocking only for rules with no
+    false positives.
 
 Steps 1 and 2 are independently shippable and reduce standing exposure immediately. Do
 not defer them behind the OAuth work.
 
 ## Open Questions
 
-- **Existing public ingress.** Is `auth.streckercm.com` fronted by Cloudflare Tunnel or
-  by NPMplus with a port forward? The answer decides §5's realization. The cloudflared
-  sidecar is recommended either way, because it removes the possibility of the public
-  ingress reaching port 3002.
-- **`PRIVATE_BIND` value.** Loopback is tightest but breaks NPMplus on CT 127, which
-  reaches CT 115 over published ports. If both containers are on the tailnet, the CT 115
-  tailnet address is the right value.
 - **Authentik `resource` parameter handling.** Unverified for 2026.5.2; determines
-  whether a scope mapping is needed to set `aud`.
-- **Gemini.** The MCP support found is Gemini Enterprise / Agent Platform and the
-  experimental Python and JS SDKs. No evidence the consumer Gemini app supports custom
-  remote MCP connectors. Nothing in this design depends on it, but the goal of "research
-  in Gemini" may not be reachable through this path.
+  whether a scope mapping is needed to set `aud`. Resolved by test 18, which gates
+  trusting the audience check at all.
+- **Streaming through Cloudflare.** Whether the edge's proxy timeouts and buffering
+  handle long-lived streamable-HTTP responses without truncation. Resolved by test 25. If
+  it does not hold, the fallback is to confirm the transport degrades to discrete
+  request/response cleanly rather than hanging.
+- **WAF false-positive rate** on knowledge-base payloads. Resolved by a week of log-only
+  operation (test 26) before any rule is set to block.
+
+Resolved during design:
+
+- Public ingress is Cloudflare Tunnel; LAN and tailnet go through NPMplus. §5 matches the
+  pattern already running for `auth.streckercm.com`.
+- `PRIVATE_BIND` is CT 115's tailnet address, with CT 127 joining the tailnet.
+- Gemini is not a requirement. Its MCP support is Gemini Enterprise / Agent Platform and
+  the experimental SDKs, with no evidence the consumer app supports custom remote
+  connectors. Nothing here depends on it.
 
 ## Risks
 
@@ -456,6 +540,14 @@ be a conscious one.
 to the shared store, content one agent ingests from a web page can become instructions a
 different agent reads later. That is a property of the shared-brain goal rather than of
 this design, and it is not mitigated here.
+
+**Cloudflare becomes a dependency for remote access, and a source of silent failures.**
+The tunnel is a hard dependency for every off-network client; the local NPMplus path is
+the mitigation, and it is why keeping split DNS is worth doing rather than merely safe.
+The subtler risk is that the WAF and rate limiter fail *quietly from the client's
+perspective* — a blocked `add_knowledge` looks like a tool that didn't work, not like a
+security control that fired. Log-only first, and check edge logs before debugging the
+gateway whenever a tool call fails only from a remote client.
 
 **Recall, not storage, is the likely disappointment.** A shared store guarantees every
 agent *can* see the same knowledge; nothing guarantees any of them *will look*. In
