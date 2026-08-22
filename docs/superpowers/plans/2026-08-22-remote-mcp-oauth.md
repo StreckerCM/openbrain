@@ -2221,24 +2221,59 @@ rather than updating one. Both front doors behave identically, so it is not a di
 but duplicate memories dilute search results, which feeds the recall risk in the spec.
 Worth a decision: upsert on `(name, project)`, or leave duplicates and dedupe at read time.
 
-### Suggested sequence
+### To do
 
-1. **Extract `db.py`** — pure move of lines 177–724. Verify by imports resolving and
-   existing behavior being untouched. No logic changes in this step.
-2. **Fix the `add_project` defect**, with a regression test. Small and independent; can be
-   done before or after step 1.
-3. **Migrate the MCP tools' 32 raw SQL sites onto `db.py`**, one group at a time, in this
-   order — cheapest and safest first: link/unlink, then archive/unarchive, then project
-   create/update, then search. Write characterization tests against current behavior
-   *before* each move, so the tests describe what the code does today rather than what the
-   refactor makes it do.
-4. **Split `tools.py` and `rest.py`** only if still wanted. By then `server.py` is roughly
-   500 lines and this step is cosmetic.
+- [ ] **A. Fix the `add_project` duplicate-name defect.** Fully independent of everything
+  else — do this first regardless of whether the rest happens. `server.py:933`, after
+  `app = _get_app_ctx(ctx)`:
 
-Circular-import gotcha for step 4: `tools.py` needs the `mcp` FastMCP instance to
-decorate against, and `server.py` needs `tools` imported for registration to happen.
-Define `mcp` in a small `core.py` that both import, and have `server.py` import `tools`
-for the side effect.
+  ```python
+      try:
+          row = await app.pool.fetchrow(
+              """INSERT INTO projects (name, description, repo_url, tech_stack, notes, orphan_policy)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING id, name, status, orphan_policy, created_at""",
+              name, description, repo_url, tech_stack or [], notes, orphan_policy,
+          )
+      except asyncpg.UniqueViolationError:
+          return json.dumps({"error": f"Project '{name}' already exists"})
+      return _format_rows([row])
+  ```
+
+  The message deliberately matches `rest_projects_create`'s 409 text, so the two front
+  doors say the same thing. Regression test: call `add_project` twice with the same name
+  and assert the second returns `{"error": "Project 'X' already exists"}` rather than
+  raising. Verify a Sentry event is *not* produced for the second call.
+
+- [ ] **B. Extract `db.py`.** Pure move of `server.py:177-724` — the 14 `_db_*` functions
+  plus the two globals they touch (`ORPHAN_POLICY`, `get_embedding`). No logic changes in
+  this step; verify by imports resolving and existing behavior being untouched. This is
+  the step that makes reuse the path of least resistance, which is the actual fix for the
+  duplication problem.
+
+- [ ] **C. Migrate the MCP tools' 32 raw SQL sites onto `db.py`.** One group at a time,
+  cheapest and safest first. Write characterization tests against current behavior
+  *before* each move, so the tests describe what the code does today rather than what the
+  refactor makes it do.
+
+  - [ ] link / unlink — byte-identical to `_db_link` / `_db_unlink`, lowest risk
+  - [ ] archive / unarchive (knowledge, memory) — identical to `_db_archive` / `_db_unarchive`
+  - [ ] project create / update / unarchive — needs a new `_db_add_project`,
+        `_db_update_project`, `_db_unarchive_project`; folds in fix A properly
+  - [ ] search — highest risk and highest value. Decide deliberately whether the limit
+        (10 vs 20), `include_archived`, `mode="exact"`, and the `project` / `category` /
+        `memory_type` filters converge, rather than picking one side by accident.
+
+- [ ] **D. Split `tools.py` and `rest.py`.** Optional. By this point `server.py` is roughly
+  500 lines and the split is cosmetic.
+
+  Circular-import gotcha: `tools.py` needs the `mcp` FastMCP instance to decorate
+  against, and `server.py` needs `tools` imported for registration to happen. Define
+  `mcp` in a small `core.py` that both import, and have `server.py` import `tools` for
+  the side effect.
+
+- [ ] **E. Decide on `save_memory` duplicates** (the adjacent finding above): upsert on
+  `(name, project)`, or keep duplicates and dedupe at read time.
 
 ### Root cause worth remembering
 
