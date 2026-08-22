@@ -18,3 +18,7 @@ knowledge-review/
 
 # Local test virtualenv for mcp-gateway
 mcp-gateway/.venv/
+
+# Python bytecode and pytest cache
+__pycache__/
+.pytest_cache/
