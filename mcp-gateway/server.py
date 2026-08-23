@@ -2078,30 +2078,66 @@ rest_app = Starlette(
 )
 
 
-async def _combined_app(scope, receive, send):
-    """Route requests: /api/* -> REST app, /mcp* -> MCP app."""
-    path = scope.get("path", "")
-    if scope["type"] == "lifespan":
-        await rest_app(scope, receive, send)
-        return
-    if path.startswith("/api"):
-        await rest_app(scope, receive, send)
-    else:
-        await mcp_asgi(scope, receive, send)
+import auth
+
+AUTH_CONFIG = auth.AuthConfig.from_env()
+
+JWKS_CACHE = auth.JWKSCache(
+    AUTH_CONFIG.jwks_url,
+    _get_http,
+    ttl=AUTH_CONFIG.jwks_cache_ttl,
+)
 
 
-app = _combined_app
+async def _authenticate(authorization, config):
+    token = auth.bearer_token(authorization, config)
+    principal = auth.match_static_token(token, config)
+    if principal is None:
+        principal = await auth.validate_jwt(token, config, JWKS_CACHE)
+    return auth.require_scopes(principal, config)
+
+
+mcp_listener_app = auth.make_mcp_listener(
+    auth.make_auth_middleware(mcp_asgi, AUTH_CONFIG, _authenticate),
+    auth.make_metadata_app(AUTH_CONFIG),
+)
+
+# The API listener keeps the existing Starlette app. It is private-only —
+# see the deployment notes; nothing authenticates these routes.
+api_listener_app = rest_app
+
+
+async def _serve() -> None:
+    import uvicorn
+
+    # We own the lifespan rather than letting either uvicorn drive it.
+    # Both servers are started with lifespan="off", so the DB pool and the
+    # MCP session manager are guaranteed to be up before either listener
+    # accepts a connection. Letting uvicorn run it on one app while the
+    # other served traffic would be a startup race.
+    async with _rest_and_mcp_lifespan(None):
+        mcp_config = uvicorn.Config(
+            mcp_listener_app,
+            host="0.0.0.0",
+            port=3001,
+            log_level="info",
+            lifespan="off",
+        )
+        api_config = uvicorn.Config(
+            api_listener_app,
+            host="0.0.0.0",
+            port=3002,
+            log_level="info",
+            lifespan="off",
+        )
+        await asyncio.gather(
+            uvicorn.Server(mcp_config).serve(),
+            uvicorn.Server(api_config).serve(),
+        )
 
 
 if __name__ == "__main__":
-    import uvicorn
-
     print("[startup] Applying database schema...", flush=True)
     asyncio.run(_apply_schema())
-    print("[startup] Starting combined MCP + REST server...", flush=True)
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=3001,
-        log_level="info",
-    )
+    print("[startup] MCP listener on :3001, private API listener on :3002", flush=True)
+    asyncio.run(_serve())

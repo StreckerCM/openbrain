@@ -22,3 +22,6 @@ mcp-gateway/.venv/
 # Python bytecode and pytest cache
 __pycache__/
 .pytest_cache/
+
+# Cloudflare tunnel credentials — never commit
+cloudflared/*.json
