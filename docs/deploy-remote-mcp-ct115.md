@@ -136,23 +136,36 @@ front this hostname (Phase 4).
 Then:
 
 ```bash
-docker compose build mcp-gateway
-docker compose up -d
-docker compose ps
-docker compose logs --tail=30 mcp-gateway
+sudo docker compose build mcp-gateway web-ui
+sudo docker compose up -d
+sudo docker compose ps
+sudo docker compose logs --tail=30 mcp-gateway
 ```
 
+**Build BOTH changed images.** `web-ui`'s image bakes in `nginx.conf`, whose write upstreams
+moved from port 3001 to 3002. `docker compose up -d` reuses an existing image, so building only
+`mcp-gateway` leaves the web UI proxying at the old port: reads keep working while every write
+returns 404. That half-failure reads like an application bug rather than a stale image. Hit live
+on 2026-08-23.
+
 Expect the gateway log to say `MCP listener on :3001, private API listener on :3002`.
+
+With `PRIVATE_BIND` set to the LAN IP the ports bind to that interface **only** — `127.0.0.1`
+will not answer. Every check below uses `$H`:
+
+```bash
+H=192.168.72.129
+```
 
 **Verify Phase 1.** Port 3007 now serves `/mcp` only. The write REST API moved to container port 3002 and is **not** published — reachable only from inside this host's docker network.
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3007/mcp \
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://$H:3007/mcp \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'          # 200 — auth is off
-curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:3007/api/bulk-delete
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://$H:3007/api/bulk-delete
                                                                 # 404 — the catch-all is gone
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3010/ # 200 — web UI
+curl -s -o /dev/null -w "%{http_code}\n" http://$H:3010/ # 200 — web UI
 ```
 
 Open the web UI through NPMplus and confirm create, edit, archive, and search still work. Those
@@ -209,10 +222,10 @@ Restart and verify:
 
 ```bash
 docker compose up -d
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3007/mcp   # 401
-curl -s -i -X POST http://127.0.0.1:3007/mcp | grep -i www-authenticate      # challenge present
-curl -s http://127.0.0.1:3007/.well-known/oauth-protected-resource           # metadata, no auth
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3007/mcp \
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://$H:3007/mcp   # 401
+curl -s -i -X POST http://$H:3007/mcp | grep -i www-authenticate      # challenge present
+curl -s http://$H:3007/.well-known/oauth-protected-resource           # metadata, no auth
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://$H:3007/mcp \
   -H "Authorization: Bearer obk_YOUR_TOKEN_HERE" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'                        # 200
