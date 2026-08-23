@@ -9,6 +9,25 @@ which assumed everything lands in one cutover. It does not have to, and it shoul
 refactor and the authentication are independent risks and separating them tells you which one
 broke something.
 
+## Access
+
+Direct SSH to the LXC, as the `docker` user:
+
+```bash
+ssh docker@192.168.72.129
+```
+
+Notes that matter for every command below:
+
+- The repo at `/docker/openbrain` is **root-owned**, and `.env` is `0600 root`. So `git` and
+  `docker compose` both need `sudo` — compose cannot even read `.env` otherwise.
+- Passwordless `sudo` works for this user.
+- The docker socket is `root:docker 660` and the user's primary group is `docker`, so bare
+  `docker` commands work; it is only `.env` and the repo files that force `sudo`.
+- Going in via `ssh streckercm@pve` + `sudo pct exec 115` also works and runs as root, but the
+  direct route is preferred — it does not need the hypervisor and does not run everything as root.
+- Phase 0 artifacts written under `/root/` are readable with `sudo cat`.
+
 ## Before you start
 
 **The stack is serving real data.** Nothing here is reversible without a backup.
