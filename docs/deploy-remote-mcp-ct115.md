@@ -110,14 +110,9 @@ MCP_JWKS_CACHE_TTL=3600
 MCP_STATIC_TOKENS=
 ```
 
-`cloudflared` is not started yet, so leave `CLOUDFLARED_CREDENTIALS_FILE` unset — but note the
-compose file marks it required (`:?`), which means **`docker compose` commands will fail until it
-is set**. Either set it to a placeholder path now, or add `--scale cloudflared=0`. Simplest:
-
-```bash
-echo 'CLOUDFLARED_CREDENTIALS_FILE=/root/cloudflared-placeholder.json' >> .env
-touch /root/cloudflared-placeholder.json
-```
+There is no `cloudflared` service in the compose project and no
+`CLOUDFLARED_CREDENTIALS_FILE` to set — CT 126 already runs a dashboard-managed tunnel and will
+front this hostname (Phase 4).
 
 Then:
 
@@ -130,7 +125,7 @@ docker compose logs --tail=30 mcp-gateway
 
 Expect the gateway log to say `MCP listener on :3001, private API listener on :3002`.
 
-**Verify Phase 1.** Two new published ports exist: 3007 → MCP, 3011 → the private write API.
+**Verify Phase 1.** Port 3007 now serves `/mcp` only. The write REST API moved to container port 3002 and is **not** published — reachable only from inside this host's docker network.
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3007/mcp \
@@ -245,23 +240,34 @@ right.
 
 ---
 
-## Phase 4 — Public ingress
+## Phase 4 — Public ingress via the existing tunnel (CT 126)
 
-```bash
-cloudflared tunnel login
-cloudflared tunnel create openbrain-mcp
-```
+CT 126 (`192.168.72.19`) already runs `cloudflared --no-autoupdate tunnel run --token …` as a
+systemd service. It is a **dashboard-managed** tunnel, so there is no local config file to edit —
+add the hostname in Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Public Hostnames:
 
-Put the credentials JSON somewhere outside the repo, point `CLOUDFLARED_CREDENTIALS_FILE` at it,
-and replace `TUNNEL_ID` in `cloudflared/config.yml` with the real tunnel ID. Add the DNS record
-for `openbrain-mcp.streckercm.com` pointing at the tunnel.
+| Field | Value |
+|---|---|
+| Subdomain | `openbrain-mcp` |
+| Domain | `streckercm.com` |
+| Path | `mcp` |
+| Service | `HTTP` → `192.168.72.129:3007` |
+
+Add a second public hostname entry with path `.well-known/oauth-protected-resource` and the same
+service, so OAuth discovery reaches the gateway. Everything not matched by a public hostname
+returns Cloudflare's 404 — no catch-all rule is needed or wanted.
+
+Because the tunnel runs on CT 126 rather than inside the compose project, port 3007 must stay
+reachable from `192.168.72.19`. That is the same requirement NPMplus already imposes, which is why
+`PRIVATE_BIND` cannot be loopback.
 
 **Do not add this hostname to local DNS yet.** Keep it public-only until the off-network checks in
 Phase 5 pass, so you are testing the path you think you are testing.
 
+Verify the tunnel picked it up:
+
 ```bash
-docker compose up -d cloudflared
-docker compose logs --tail=20 cloudflared
+ssh streckercm@192.168.72.102 "sudo pct exec 126 -- journalctl -u cloudflared -n 20 --no-pager"
 ```
 
 ---
@@ -307,10 +313,12 @@ Finally, at the Cloudflare edge:
   who can obtain a usable token.
 - With Authentik down and the key cache expired, one request per 30s window waits up to 10s before
   succeeding with the cached key.
-- **`/api/*` on port 3011 is unauthenticated** and reachable by any container on the Docker
-  network. The cloudflared ingress rules are what keep it off the internet — that is a rule, not a
-  network boundary. Re-check this against CT 115's actual compose file, which is known to diverge
-  from the repo on networking.
+- **`/api/*` is unauthenticated**, but it is no longer published to the host at all — only
+  containers on CT 115's own docker network can reach it. That is a network boundary rather than a
+  proxy rule, which is stronger than what the spec originally described.
+- The Cloudflare tunnel's ingress rules now live in the **dashboard**, not in git. That is the
+  cost of reusing CT 126: a change to what is publicly exposed leaves no diff and no review trail.
+  Worth a periodic look at the tunnel's public hostname list.
 
 ## Rollback at any point
 

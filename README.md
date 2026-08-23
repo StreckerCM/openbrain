@@ -64,7 +64,7 @@ This launches eight services:
 | Service | Port | Description |
 |---------|------|-------------|
 | **db** | 5433 | PostgreSQL 17 with pgvector extension |
-| **mcp-gateway** | 3007, 3011 | Python FastMCP server — 3007 serves `/mcp` (public-facing, OAuth), 3011 serves the write REST API for the web UI (private only) |
+| **mcp-gateway** | 3007 | Python FastMCP server. 3007 serves `/mcp` and is the only published port. The write REST API runs on container port 3002 and is **not** published — web-ui reaches it over the internal docker network, so nothing outside this host can route to it. |
 | **web-ui** | 3010 | Dashboard SPA — browse, search, create, edit, archive, delete |
 | **postgrest** | 3006 | REST API over the database (read layer for web UI) |
 | **embedder** | — | Background service that generates vector embeddings every 30s |

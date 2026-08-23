@@ -562,6 +562,25 @@ Resolved during design:
   the experimental SDKs, with no evidence the consumer app supports custom remote
   connectors. Nothing here depends on it.
 
+## Amendment 2026-08-23 — reuse the existing tunnel, stop publishing the write API
+
+Superseded §5's cloudflared sidecar. CT 126 already runs a dashboard-managed tunnel, and CT 115's
+ports must stay reachable on the LAN for NPMplus regardless, so a second tunnel inside the compose
+project bought nothing.
+
+The consequence is better than the original design. With an external tunnel, the write API's
+container port 3002 no longer needs publishing at all — its only consumer is web-ui, which reaches
+`mcp-gateway:3002` over the internal docker network. So it is now unpublished, and nothing outside
+CT 115 can route to it. That is the network boundary D5 originally claimed and did not have: the
+earlier correction established that a sidecar on the same docker network could reach 3002 freely.
+Moving the tunnel off the host and closing the port achieves by construction what the sidecar
+arrangement only achieved by rule.
+
+What is lost: the ingress rules now live in the Cloudflare dashboard rather than `cloudflared/config.yml`
+in git, so a change to the public surface leaves no diff and no review trail. That was the stated
+reason for preferring a locally-managed tunnel. Accepted deliberately — the port closure is worth
+more than the reviewability, and the public hostname list is auditable in the dashboard.
+
 ## Risks
 
 **Blast radius is unchanged by this work.** Any holder of a valid token gets all 19
