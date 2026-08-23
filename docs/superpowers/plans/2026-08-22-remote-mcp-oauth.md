@@ -2401,11 +2401,17 @@ Worth a decision: upsert on `(name, project)`, or leave duplicates and dedupe at
   and assert the second returns `{"error": "Project 'X' already exists"}` rather than
   raising. Verify a Sentry event is *not* produced for the second call.
 
-- [ ] **B. Extract `db.py`.** Pure move of `server.py:177-724` — the 14 `_db_*` functions
-  plus the two globals they touch (`ORPHAN_POLICY`, `get_embedding`). No logic changes in
-  this step; verify by imports resolving and existing behavior being untouched. This is
-  the step that makes reuse the path of least resistance, which is the actual fix for the
-  duplication problem.
+- [x] **B. Extract `db.py`.** DONE 2026-08-23 on branch `refactor/extract-db-layer`.
+  Pure move, verified byte-identical: 541 data-layer lines to `db.py`, 15 `get_embedding`
+  lines to a separate `embeddings.py` (an outbound model-provider call is not database
+  access), and `server.py`'s only additions were the import block. `server.py` 2,161 →
+  1,591.
+
+  Two things the plan got wrong here, corrected during the work: the region depends on
+  **three** module-level names, not two — it also uses `VALID_MEMORY_TYPES`, which
+  `server.py` defined 800 lines *below* its first use, legal only because the reference
+  sits inside a function body. And `mcp-gateway/Dockerfile` needed both new modules added
+  to its `COPY` line, the same trap Task 2 hit.
 
 - [ ] **C. Migrate the MCP tools' 32 raw SQL sites onto `db.py`.** One group at a time,
   cheapest and safest first. Write characterization tests against current behavior
