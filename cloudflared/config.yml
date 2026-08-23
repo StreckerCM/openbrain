@@ -1,0 +1,19 @@
+# Locally-managed tunnel configuration, kept in the repo so the public
+# surface is reviewable in version control rather than living in a
+# dashboard. Replace TUNNEL_ID with the id from `cloudflared tunnel create`.
+tunnel: TUNNEL_ID
+credentials-file: /etc/cloudflared/credentials.json
+
+# Rules match in order; the first match wins and the last rule is the
+# catch-all. cloudflared reaches mcp-gateway over the compose network on
+# port 3001 only — the write API on 3002 is not routable from here.
+ingress:
+  - hostname: openbrain-mcp.streckercm.com
+    path: ^/mcp$
+    service: http://mcp-gateway:3001
+
+  - hostname: openbrain-mcp.streckercm.com
+    path: ^/\.well-known/oauth-protected-resource
+    service: http://mcp-gateway:3001
+
+  - service: http_status:404

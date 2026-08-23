@@ -102,6 +102,16 @@ services:
     ports:
       - "${PRIVATE_BIND:-127.0.0.1}:3009:80"
 
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ${CLOUDFLARED_CREDENTIALS_FILE:?Set CLOUDFLARED_CREDENTIALS_FILE in .env}:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      - mcp-gateway
+
 volumes:
   pgdata:
 
