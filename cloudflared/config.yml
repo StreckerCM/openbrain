@@ -13,7 +13,7 @@ credentials-file: /etc/cloudflared/credentials.json
 # /api/* would require someone to add a rule naming :3002 explicitly.
 ingress:
   - hostname: openbrain-mcp.streckercm.com
-    path: ^/mcp$
+    path: ^/mcp/?$
     service: http://mcp-gateway:3001
 
   - hostname: openbrain-mcp.streckercm.com

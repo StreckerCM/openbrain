@@ -2106,9 +2106,6 @@ mcp_listener_app = auth.make_mcp_listener(
 # see the deployment notes; nothing authenticates these routes.
 api_listener_app = rest_app
 
-# Kept so `server:app` still resolves for anything referencing it.
-app = mcp_listener_app
-
 
 async def _serve() -> None:
     import uvicorn

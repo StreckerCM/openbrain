@@ -5,6 +5,7 @@ listener and what it takes to reach it. It is deliberately separate from
 server.py, which holds the 19 MCP tools and the REST API.
 """
 
+import asyncio
 import hmac
 import json
 import os
@@ -155,11 +156,19 @@ class JWKSCache:
         self._keys: dict[str, "jwt.PyJWK"] = {}
         self._fetched_at: float | None = None
         self._last_attempt: float | None = None
+        self._lock = asyncio.Lock()
+        self._fetch_generation = 0
+        self._last_fetch_ok = False
 
     async def _fetch(self) -> bool:
         """Refresh the key set. Returns True on success. Never raises for
         a network or parse failure — the caller decides whether a stale
-        cache is good enough."""
+        cache is good enough.
+
+        Only ever called while holding `_lock` (via `_fetch_once`), so
+        `_last_attempt` and the rest of the cache state change atomically
+        from the point of view of concurrent callers.
+        """
         self._last_attempt = self._clock()
         try:
             response = await self._http_getter().get(self._url, timeout=10.0)
@@ -167,10 +176,33 @@ class JWKSCache:
             key_set = jwt.PyJWKSet.from_dict(response.json())
         except Exception as exc:  # network, HTTP, JSON, or key parse
             print(f"[auth] JWKS fetch failed: {exc}", flush=True)
-            return False
-        self._keys = {k.key_id: k for k in key_set.keys if k.key_id}
-        self._fetched_at = self._clock()
-        return True
+            self._last_fetch_ok = False
+        else:
+            self._keys = {k.key_id: k for k in key_set.keys if k.key_id}
+            self._fetched_at = self._clock()
+            self._last_fetch_ok = True
+        self._fetch_generation += 1
+        return self._last_fetch_ok
+
+    async def _fetch_once(self) -> bool:
+        """Serialize concurrent fetch attempts behind a lock, so a burst of
+        requests that all decide a fetch is needed (cold cache, expired
+        cache, or an unknown kid) produces exactly one outbound request.
+
+        A caller that acquires the lock after another coroutine already
+        completed a fetch does not fetch again: it just observes the
+        outcome the winner left behind (`_fetch_generation` having moved
+        on), which is exactly what its own fetch would have produced.
+        Without this, every waiter would otherwise block on `_lock` for
+        the full duration of the in-flight fetch and then, on the old
+        code path, fail `_may_refetch()` and raise `JWKSUnavailable`
+        instead of reading the now-populated cache.
+        """
+        generation_before = self._fetch_generation
+        async with self._lock:
+            if self._fetch_generation == generation_before:
+                return await self._fetch()
+        return self._last_fetch_ok
 
     def _expired(self) -> bool:
         return self._fetched_at is None or (
@@ -182,22 +214,43 @@ class JWKSCache:
             self._clock() - self._last_attempt >= self._min_refetch_interval
         )
 
+    def _may_join_or_start_fetch(self) -> bool:
+        """Whether this call should go through `_fetch_once()`: either a
+        fetch is already in flight (join it, uncounted against the rate
+        limit -- it is not a new outbound request) or the rate limit
+        floor allows starting a new one.
+
+        Checking `_lock.locked()` matters because `_last_attempt` is
+        written synchronously at the very start of `_fetch()`, before its
+        first `await`. Without this check, every concurrent caller that
+        hasn't yet reached the lock would see `_may_refetch()` already
+        false because of the in-flight fetch's own `_last_attempt` write,
+        and would raise `JWKSUnavailable` instead of waiting to read the
+        cache the in-flight fetch is about to populate.
+        """
+        return self._lock.locked() or self._may_refetch()
+
     async def get_key(self, kid: str) -> "jwt.PyJWK":
-        if self._expired() and self._may_refetch():
+        if self._expired() and self._may_join_or_start_fetch():
             # A failure here is survivable if we still hold keys. Gated by
-            # _may_refetch() too: without it, a sustained outage past ttl
-            # would trigger a fresh 10s-timeout fetch attempt on every
-            # request, stalling requests that already have a valid cached
-            # key -- exactly the amplifier min_refetch_interval exists to
-            # prevent, just reached via the TTL path instead of unknown-kid.
-            await self._fetch()
+            # _may_join_or_start_fetch() too: without it, a sustained
+            # outage past ttl would trigger a fresh 10s-timeout fetch
+            # attempt on every request, stalling requests that already
+            # have a valid cached key -- exactly the amplifier
+            # min_refetch_interval exists to prevent, just reached via
+            # the TTL path instead of unknown-kid.
+            await self._fetch_once()
 
         if kid in self._keys:
             return self._keys[kid]
 
         # Unknown kid: the AS may have rotated. Refetch once, rate-limited
         # so junk kids cannot drive unbounded outbound requests.
-        if self._may_refetch() and await self._fetch() and kid in self._keys:
+        if (
+            self._may_join_or_start_fetch()
+            and await self._fetch_once()
+            and kid in self._keys
+        ):
             return self._keys[kid]
 
         raise JWKSUnavailable(f"no signing key for kid={kid!r}")
@@ -354,7 +407,17 @@ def bearer_token(authorization: str | None, config: AuthConfig) -> str:
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() != "bearer" or not value.strip():
         raise Unauthorized("expected an Authorization: Bearer credential", config)
-    return value.strip()
+    token = value.strip()
+    if not token.isascii():
+        # A credential the server cannot even parse as a token is an
+        # invalid credential -- 401, not a 500. hmac.compare_digest()
+        # (used by match_static_token) raises TypeError on non-ASCII str
+        # operands, and _header() decodes the raw header bytes as
+        # latin-1, so any non-ASCII byte in the Authorization header
+        # would otherwise reach compare_digest() and escape as an
+        # unhandled exception instead of a clean 401.
+        raise Unauthorized("credential is not a valid bearer token", config)
+    return token
 
 
 def match_static_token(token: str, config: AuthConfig) -> Principal | None:

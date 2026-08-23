@@ -550,3 +550,109 @@ def test_only_missing_scopes_are_challenged():
 def test_static_token_principal_satisfies_scopes(static_config):
     principal = auth.match_static_token("tok-alpha", static_config)
     assert auth.require_scopes(principal, static_config) is principal
+
+
+# --- F1: non-ASCII bearer credential must be a 401, never a 500 -----------
+
+
+@pytest.mark.parametrize("credential", ["\xff\xfe", "tokéken", "Àlice"])
+def test_non_ascii_bearer_credential_is_unauthorized_with_static_tokens(
+    static_config, credential
+):
+    with pytest.raises(auth.Unauthorized):
+        auth.bearer_token(f"Bearer {credential}", static_config)
+
+
+@pytest.mark.parametrize("credential", ["\xff\xfe", "tokéken"])
+def test_non_ascii_bearer_credential_is_unauthorized_without_static_tokens(
+    config, credential
+):
+    with pytest.raises(auth.Unauthorized):
+        auth.bearer_token(f"Bearer {credential}", config)
+
+
+def test_non_ascii_bearer_credential_never_reaches_match_static_token(static_config):
+    # bearer_token() must reject it outright -- if it didn't, this would be
+    # the TypeError from hmac.compare_digest that produced the live 500.
+    with pytest.raises(auth.Unauthorized):
+        token = auth.bearer_token("Bearer \xff\xfe", static_config)
+        auth.match_static_token(token, static_config)
+
+
+async def test_non_ascii_bearer_credential_returns_401_not_500_through_middleware(
+    static_config,
+):
+    """Drives the middleware with a raw ASGI scope rather than TestClient:
+    httpx's own client-side header encoding refuses non-ASCII str header
+    values outright, which would prove nothing about the server-side path.
+    The live bug is server-side -- uvicorn/starlette hand the middleware
+    already-decoded (via latin-1) header bytes off the wire, exactly like
+    the raw `Authorization: Bearer \\xff\\xfe` header the reviewer sent.
+    """
+
+    async def authenticate(authorization, config):
+        token = auth.bearer_token(authorization, config)
+        principal = auth.match_static_token(token, config)
+        if principal is None:
+            raise auth.Unauthorized("credential not recognized", config)
+        return principal
+
+    guarded = auth.make_auth_middleware(_stub("mcp"), static_config, authenticate)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(b"authorization", b"Bearer \xff\xfe")],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    await guarded(scope, receive, send)
+
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    assert start["status"] == 401
+
+
+# --- F2: concurrent cold-start requests must share one fetch --------------
+
+
+async def test_concurrent_cold_start_requests_share_one_outbound_fetch(jwks_document):
+    """Reproduces the reviewer's scenario: N concurrent get_key calls
+    against a cold cache and a slow JWKS endpoint. Before the fix, only
+    the first caller's `_last_attempt` write blocks every other waiter
+    behind `_may_refetch()` for the whole in-flight fetch, so the losers
+    raise JWKSUnavailable instead of waiting on the winner's result.
+    A short real `asyncio.sleep` is used here (not FakeClock) because the
+    point under test is genuine coroutine interleaving under a lock, not
+    elapsed cache time.
+    """
+    import asyncio
+
+    import httpx
+
+    calls = {"n": 0}
+
+    async def slow_handler(request):
+        calls["n"] += 1
+        await asyncio.sleep(0.2)
+        return httpx.Response(200, json=jwks_document)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(slow_handler))
+    cache = auth.JWKSCache(JWKS_URL, lambda: client)
+
+    results = await asyncio.gather(
+        *(cache.get_key(KID) for _ in range(5)),
+        return_exceptions=True,
+    )
+
+    unavailable = [r for r in results if isinstance(r, auth.JWKSUnavailable)]
+    assert calls["n"] == 1, f"expected 1 outbound fetch, got {calls['n']}"
+    assert unavailable == [], f"expected zero JWKSUnavailable, got {len(unavailable)}"
+    assert all(r.key_id == KID for r in results if not isinstance(r, Exception))

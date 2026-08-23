@@ -195,7 +195,11 @@ WWW-Authenticate: Bearer resource_metadata="https://openbrain-mcp.streckercm.com
 
 Wraps the MCP app only. Order matters — cheapest and most decisive checks first.
 
-1. Read `Authorization`. Missing or not `Bearer` → `401` with the challenge above.
+1. Read `Authorization`. Missing, not `Bearer`, or a credential containing non-ASCII bytes
+   → `401` with the challenge above. The non-ASCII check runs before the value ever reaches
+   `hmac.compare_digest`, which raises `TypeError` on non-ASCII `str` operands rather than
+   returning `False` — a credential the server cannot even parse as a token is treated as an
+   invalid credential, not a server error.
 2. If static tokens are configured and the value matches one under
    `hmac.compare_digest`, grant all scopes and proceed. Constant-time comparison
    is required; a plain `==` on a secret is a timing oracle.
@@ -229,6 +233,16 @@ A JWKS fetch failure while a cached set is still held is not fatal — serve fro
 log. A failure with no cached set returns `503`, not `401`: the client's token may be
 perfectly valid and telling it otherwise would send it into a pointless reauthorization
 loop.
+
+Concurrent fetch attempts are serialized behind an `asyncio.Lock`. A caller that decides a
+fetch is needed (cold cache, expired cache, or an unknown `kid`) but finds one already in
+flight joins it — awaiting the lock and then reading the cache the in-flight fetch just
+populated — rather than treating itself as separately rate-limited and failing closed. This
+matters because the refetch-rate-limit timestamp is written synchronously at the very start
+of a fetch, before its first `await`; without lock-aware joining, every request in a
+cold-start burst except the first would see the rate limit as already exhausted by the
+in-flight fetch and raise `JWKSUnavailable`, turning every process restart into a burst of
+spurious `503`s for the duration of one JWKS fetch.
 
 ## 4. Authentik Configuration
 
