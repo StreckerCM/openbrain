@@ -58,9 +58,24 @@ docker compose exec -T db pg_dump -U openbrain openbrain \
 ls -lh /root/openbrain-*.sql.gz
 ```
 
-**Check the working tree before pulling.** It should be clean as of `243c606`. If
-`git status` shows local edits to `docker-compose.yml`, stop and investigate — this deploy
-changes that file, and something re-diverged.
+**Verified state of CT 115, 2026-08-23** (checked via `pct exec 115` from pve):
+
+| | |
+|---|---|
+| Path | `/docker/openbrain` — correct |
+| Branch / commit | `main` at `4a5e567` (PR #14) |
+| Behind `development` by | **42 commits** |
+| Working tree | **Clean.** `docker-compose.yml` md5 matches the committed blob exactly. The
+divergence warning in the old notes is resolved — a pull is safe. |
+| Untracked | `docker-compose.yml.bak-20260716` only |
+| Containers | all 7 up |
+| `.env` keys | `OPENAI_API_KEY`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PGRST_JWT_SECRET`, `SENTRY_DSN` — nothing else |
+
+Because CT 115 sits at `4a5e567`, this pull also brings PRs #15 (MCP URL trailing slash), #16
+(docs), #17 (the `add_project` duplicate-name fix) and #18 (spec/plan) — not just the auth work.
+Larger blast radius than a one-PR deploy; worth knowing before you start.
+
+Confirm nothing has changed since that check:
 
 ```bash
 git status --short
