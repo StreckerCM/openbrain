@@ -238,39 +238,96 @@ not** — everything after this assumes a working authenticated path.
 
 ## Phase 3 — Authentik provider
 
-In the Authentik admin UI, create an **OAuth2/OpenID Provider** named `OpenBrain MCP`:
+Authentik is 2026.5.2 and has **no Dynamic Client Registration** (that shipped in 2026.8), so the
+client is registered by hand. That is fine — the MCP spec treats DCR as optional and deprecated,
+and both claude.ai and ChatGPT accept a pre-registered client ID and secret.
+
+Verified 2026-08-23: `https://auth.streckercm.com/application/o/openbrain-mcp/.well-known/openid-configuration`
+returns **404**, so nothing exists yet.
+
+### 3a. Scope mappings — create three
+
+Applications → Property Mappings → Create → **Scope Mapping**, three times:
+
+| Name | Scope name | Expression |
+|---|---|---|
+| OpenBrain read | `openbrain:read` | `return {}` |
+| OpenBrain write | `openbrain:write` | `return {}` |
+| OpenBrain audience | `openbrain:aud` | `return {"aud": "https://openbrain-mcp.streckercm.com/mcp"}` |
+
+The third one is the load-bearing piece and the most likely thing to get wrong. The gateway
+rejects any token whose `aud` is not exactly `https://openbrain-mcp.streckercm.com/mcp`, because
+the MCP spec requires a resource server to accept only tokens minted for it. Authentik 2026.5 is
+not known to honour the OAuth `resource` parameter, so the audience is injected by this mapping
+rather than derived from the request.
+
+### 3b. Provider
+
+Applications → Providers → Create → **OAuth2/OpenID Provider**:
 
 | Setting | Value |
 |---|---|
-| Client type | Confidential |
-| Redirect URIs | The callback URLs claude.ai and ChatGPT show during connector setup |
-| Signing key | An RS256 certificate |
-| Scopes | `openid`, `profile`, `email`, plus custom `openbrain:read` and `openbrain:write` |
-| Subject mode | Based on user ID |
+| Name | `OpenBrain MCP` |
+| Authorization flow | your usual explicit-consent flow |
+| Client type | **Confidential** |
+| Client ID / Secret | generated — copy both, they go into the claude.ai connector |
+| Redirect URIs | see below |
+| Signing key | an **RS256** certificate (the gateway validates via JWKS; HS256 will not work) |
+| Scopes | `openid`, `profile`, `email`, plus the three mappings from 3a |
+| Subject mode | Based on the user's ID |
 
-Create an **Application** with slug `openbrain-mcp` — this fixes the discovery URLs used above.
-**Bind a policy restricting it to your account or a dedicated group.** Without one, every
-Authentik user can mint a working token.
+Redirect URIs — one per line:
 
-Verify discovery resolves:
-
-```bash
-curl -s https://auth.streckercm.com/application/o/openbrain-mcp/.well-known/openid-configuration \
-  | head -c 400
+```
+https://claude.ai/api/mcp/auth_callback
+https://claude.com/api/mcp/auth_callback
 ```
 
-**The check that gates everything else.** Obtain a real token and decode it:
+The `.com` variant is Anthropic's documented future callback; allowlisting both now avoids a
+silent break later. If you also want Claude Code to use OAuth rather than the static token, add
+loopback entries — Claude Code redirects to `http://localhost:PORT/callback` and
+`http://127.0.0.1:PORT/callback` on an ephemeral port, so either pin the port with
+`--callback-port` and register that exact URI, or use regex-style redirect matching.
+
+### 3c. Application
+
+Applications → Applications → Create:
+
+| Setting | Value |
+|---|---|
+| Name | `OpenBrain MCP` |
+| **Slug** | **`openbrain-mcp`** — must match exactly; it is what makes the discovery URLs in `.env` resolve |
+| Provider | `OpenBrain MCP` |
+
+**Bind a policy** restricting this application to your account or a dedicated group. Without one,
+every Authentik user can mint a token that the gateway will accept.
+
+### 3d. Verify
+
+Discovery should now resolve:
+
+```bash
+curl -s https://auth.streckercm.com/application/o/openbrain-mcp/.well-known/openid-configuration | head -c 400
+curl -s -o /dev/null -w "%{http_code}
+" https://auth.streckercm.com/application/o/openbrain-mcp/jwks/
+```
+
+Then the check that gates Phase 4 — obtain a real access token and decode its payload:
 
 ```bash
 echo '<paste JWT>' | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool
 ```
 
-`aud` **must** contain `https://openbrain-mcp.streckercm.com/mcp`. Authentik's handling of the
-`resource` parameter is unverified for 2026.5.2 — if the audience is wrong, add a scope mapping
-that injects it. The gateway rejects any token not minted for it, so nothing works until this is
-right.
+Confirm all four:
 
----
+- `aud` contains `https://openbrain-mcp.streckercm.com/mcp`
+- `iss` is exactly `https://auth.streckercm.com/application/o/openbrain-mcp/` — trailing slash
+  included, since the gateway compares without normalising
+- `scope` includes `openbrain:read`
+- the JWT header shows `"alg": "RS256"` and carries a `kid`
+
+If `aud` is missing or wrong, the mapping in 3a is not attached to the provider. Everything else
+can look perfect and every request will still return an undifferentiated 401.
 
 ## Phase 4 — Public ingress via the existing tunnel (CT 126)
 
