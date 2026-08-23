@@ -4,7 +4,7 @@
 
 **Goal:** Make OpenBrain's `/mcp` endpoint reachable from the public internet with OAuth 2.1 bearer-token authentication, while confining the web UI, PostgREST, Adminer, and the unauthenticated write API to the LAN and tailnet.
 
-**Architecture:** The gateway becomes an OAuth 2.0 Resource Server. Authentik at `auth.streckercm.com` is the Authorization Server; the gateway validates RS256 JWTs against Authentik's JWKS and never handles credentials. The MCP endpoint and the write REST API move onto separate uvicorn listeners in the same process, so the public ingress has no route to the write API regardless of how it is configured. A `cloudflared` sidecar provides the public path; NPMplus continues to serve LAN and tailnet clients, which is safe because enforcement lives in the application rather than at the edge.
+**Architecture:** The gateway becomes an OAuth 2.0 Resource Server. Authentik at `auth.streckercm.com` is the Authorization Server; the gateway validates RS256 JWTs against Authentik's JWKS and never handles credentials. The MCP endpoint and the write REST API move onto separate uvicorn listeners in the same process; the public ingress is configured to reach only the MCP listener, whose own routing 404s anything outside `/mcp` and the metadata prefix — see Task 9 for what this guarantee does and does not cover. A `cloudflared` sidecar provides the public path; NPMplus continues to serve LAN and tailnet clients, which is safe because enforcement lives in the application rather than at the edge.
 
 **Tech Stack:** Python 3.12, FastMCP (`mcp[http]==1.27.0`), Starlette, uvicorn, asyncpg, httpx, PyJWT with the `crypto` extra, pytest with pytest-asyncio, Docker Compose, cloudflared.
 
@@ -1981,7 +1981,7 @@ holds instead of re-requesting everything."
 
 ## Task 9: Add the cloudflared sidecar
 
-The tunnel is an outbound connection, so the homelab keeps no listening port on its public interface. The ingress rules are a second line — the first is that cloudflared has no route to port 3002 at all.
+The tunnel is an outbound connection, so the homelab keeps no listening port on its public interface. The ingress rules are the only line of defence against the write API being reached through the tunnel: `cloudflared` and `mcp-gateway` share Compose's default network, so `cloudflared` has the same network-level reachability to port 3002 as it does to 3001. What actually protects the write API is that the ingress rule targets port 3001, whose listener 404s everything outside `/mcp` and the metadata prefix — reaching `/api/*` through the tunnel would require someone to explicitly add a rule naming `:3002`.
 
 **Files:**
 - Create: `cloudflared/config.yml`
@@ -2005,8 +2005,12 @@ tunnel: TUNNEL_ID
 credentials-file: /etc/cloudflared/credentials.json
 
 # Rules match in order; the first match wins and the last rule is the
-# catch-all. cloudflared reaches mcp-gateway over the compose network on
-# port 3001 only — the write API on 3002 is not routable from here.
+# catch-all. cloudflared reaches mcp-gateway over the compose network; it
+# has the same network-level reachability to port 3002 as it does to 3001
+# (Compose's default network has no per-service isolation). What keeps the
+# write API private is that these rules only ever target 3001, whose
+# listener 404s anything outside /mcp and the metadata prefix — exposing
+# /api/* would require someone to add a rule naming :3002 explicitly.
 ingress:
   - hostname: openbrain-mcp.streckercm.com
     path: ^/mcp$

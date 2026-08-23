@@ -5,8 +5,12 @@ tunnel: TUNNEL_ID
 credentials-file: /etc/cloudflared/credentials.json
 
 # Rules match in order; the first match wins and the last rule is the
-# catch-all. cloudflared reaches mcp-gateway over the compose network on
-# port 3001 only — the write API on 3002 is not routable from here.
+# catch-all. cloudflared reaches mcp-gateway over the compose network; it
+# has the same network-level reachability to port 3002 as it does to 3001
+# (Compose's default network has no per-service isolation). What keeps the
+# write API private is that these rules only ever target 3001, whose
+# listener 404s anything outside /mcp and the metadata prefix — exposing
+# /api/* would require someone to add a rule naming :3002 explicitly.
 ingress:
   - hostname: openbrain-mcp.streckercm.com
     path: ^/mcp$

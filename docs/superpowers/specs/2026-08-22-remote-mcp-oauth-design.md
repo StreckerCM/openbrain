@@ -111,11 +111,20 @@ checked in the same place so there is exactly one code path that can grant acces
 Static tokens are disabled unless explicitly configured.
 
 **D5 — The MCP endpoint and the write API listen on different ports.**
-This is the one structural decision worth the extra code. A path allowlist on the public
-ingress would also keep `/api/*` private, but it is configuration, and this project has
-already been burned once by a security property that depended on configuration being
-right. Two listeners make it impossible for the public ingress to reach the write API
-regardless of how the ingress is configured, because it is not listening on that port.
+A path allowlist on the public ingress would also keep `/api/*` private, but it is
+configuration, and this project has already been burned once by a security property
+that depended on configuration being right. Splitting the listeners narrows what a
+misconfigured ingress rule can do: because `mcp-gateway` still runs as one container on
+one compose network, `cloudflared` has network-level reachability to port 3002 the same
+way it does to 3001 — Compose's default network puts every service on the same bridge
+with no per-service network isolation. The guarantee the split actually buys is that an
+ingress rule targeting port 3001 cannot reach the write API *whatever path it allows*,
+because that listener 404s everything outside `/mcp` and the metadata prefix. Before the
+split, a permissive or catch-all ingress rule pointing at the gateway would have exposed
+`/api/*` directly. After it, exposing `/api/*` requires someone to explicitly write an
+ingress rule that targets `:3002`. That is a narrower guarantee than "no route exists,"
+and it is still worth having. See Risks for the container-split option that would close
+this gap, and why it is not being done now.
 
 **D6 — Fail closed on startup.**
 If authentication is enabled but the issuer or JWKS URL is unset, the gateway refuses to
@@ -268,9 +277,15 @@ differently depending on where you ask.
 
 A `cloudflared` service joins the compose project and reaches `http://mcp-gateway:3001`
 over the internal docker network. Its ingress rule permits `/mcp` and
-`/.well-known/oauth-protected-resource*` and nothing else. Port 3002 is not on any
-network cloudflared can route to, so the write API is unreachable from the tunnel by
-construction rather than by rule — the rule is the second line, not the first.
+`/.well-known/oauth-protected-resource*` and nothing else. `mcp-gateway` and
+`cloudflared` share Compose's default network with no per-service isolation, so
+`cloudflared` *can* reach `mcp-gateway:3002` at the network layer — the write API is not
+unreachable "by construction." What the ingress rule actually guarantees is narrower:
+because the rule targets port 3001 and that listener 404s anything outside `/mcp` and
+the metadata prefix, the write API stays private unless someone explicitly adds a rule
+that targets `:3002`. That is the only line of defence here, not a second one behind a
+network-level first line. See Risks for the container-split that would add a real
+network boundary, and the cost of doing so.
 
 ### Split DNS is now safe, and that is a consequence of D1
 
@@ -554,6 +569,22 @@ The subtler risk is that the WAF and rate limiter fail *quietly from the client'
 perspective* — a blocked `add_knowledge` looks like a tool that didn't work, not like a
 security control that fired. Log-only first, and check edge logs before debugging the
 gateway whenever a tool call fails only from a remote client.
+
+**The write API's isolation from the tunnel is a rule, not a network boundary.**
+`cloudflared` and `mcp-gateway` run in the same compose project with no `networks:` key,
+so they share Docker Compose's default network and `cloudflared` has the same
+network-level reachability to `mcp-gateway:3002` as it does to `:3001`. The only thing
+stopping the tunnel from reaching the write API is that its ingress config has no rule
+naming port 3002. Closing this properly means splitting `mcp-gateway` into two
+containers — one for the MCP listener, one for the write API — placed on separate
+compose networks so there is a real network boundary instead of an omitted rule. That is
+future work, not part of this design, because Task 2 deliberately unified lifespan
+ownership: one process owns the DB connection pool and the MCP session manager so
+startup ordering between them is a non-issue. Splitting into two containers means two
+pools and two session managers, and reintroduces the startup-ordering problem Task 2
+specifically removed. Worth doing if the write API ever needs to be reachable from
+somewhere less trusted than it is today; not worth doing to fix a documentation
+overclaim.
 
 **Recall, not storage, is the likely disappointment.** A shared store guarantees every
 agent *can* see the same knowledge; nothing guarantees any of them *will look*. In
