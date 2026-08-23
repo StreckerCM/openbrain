@@ -59,19 +59,24 @@ SENTRY_DSN=
 docker compose up -d --build
 ```
 
-This launches seven services:
+This launches eight services:
 
 | Service | Port | Description |
 |---------|------|-------------|
 | **db** | 5433 | PostgreSQL 17 with pgvector extension |
-| **mcp-gateway** | 3007 | Python FastMCP server — MCP endpoint + REST API for web UI |
+| **mcp-gateway** | 3007, 3011 | Python FastMCP server — 3007 serves `/mcp` (public-facing, OAuth), 3011 serves the write REST API for the web UI (private only) |
 | **web-ui** | 3010 | Dashboard SPA — browse, search, create, edit, archive, delete |
 | **postgrest** | 3006 | REST API over the database (read layer for web UI) |
 | **embedder** | — | Background service that generates vector embeddings every 30s |
 | **adminer** | 3008 | Web-based database browser |
 | **docs** | — | Nginx serving the docs directory |
+| **cloudflared** | — | Tunnel sidecar that exposes `mcp-gateway`'s `/mcp` port to the public internet |
 
-> **Note:** The compose file references an external `nginxproxymanager_default` network for reverse proxy integration. If you're not using Nginx Proxy Manager, remove the `networks: nginxproxymanager_default` references from `docker-compose.yml` and access services directly on their mapped ports.
+> **Note:** `docker compose up` requires `CLOUDFLARED_CREDENTIALS_FILE` to point at a
+> real file, even for a local-only stack — compose fails fast with `Set
+> CLOUDFLARED_CREDENTIALS_FILE in .env` otherwise. See [Remote access](#remote-access)
+> for what that file is; point it at any placeholder file if you don't need the tunnel
+> running locally.
 
 ### 3. Verify
 
@@ -79,7 +84,9 @@ This launches seven services:
 # Check all services are running
 docker compose ps
 
-# Test the MCP gateway (should return a JSON-RPC response)
+# Test the MCP gateway (should return a JSON-RPC response).
+# MCP_AUTH_ENABLED defaults to true, so this returns 401 unless you add
+# -H "Authorization: Bearer <token>" — see Remote access below.
 curl -X POST http://localhost:3007/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -160,7 +167,7 @@ If you're running the stack locally, point to `localhost` instead:
 }
 ```
 
-> **Important:** Do not use `"type": "http"` — Claude Code's native HTTP transport triggers OAuth discovery, which this server does not support. Use supergateway to bridge stdio ↔ Streamable HTTP instead.
+> **Note:** This local setup uses supergateway to bridge stdio to the gateway's Streamable HTTP endpoint. If you're connecting to the public OAuth-protected endpoint instead, use Claude Code's native `"type": "http"` transport with a bearer token — see [Remote access](#remote-access) — rather than supergateway.
 
 ### Verify the connection
 
@@ -308,6 +315,97 @@ Access is restricted to:
 | LAN | `192.168.1.0/24` |
 | Tailscale | `100.72.222.0/24`, `100.87.233.84` |
 | WireGuard | `10.0.0.0/24` |
+
+This restricts every service except the MCP endpoint. See [Remote access](#remote-access)
+for the OAuth-protected public path in front of `/mcp`.
+
+## Remote access
+
+The MCP endpoint at `https://openbrain-mcp.streckercm.com/mcp` is reachable from the
+public internet through a Cloudflare Tunnel and requires an OAuth 2.1 bearer token.
+Everything else — the web UI, PostgREST, Adminer, and the write REST API — stays on
+the LAN and tailnet only.
+
+The gateway runs two listeners: a public one serving `/mcp` and the metadata routes,
+and a private one serving `/api/*`. The public listener 404s anything outside those two
+paths, so an ingress rule that only ever targets the public port cannot reach the write
+API whatever path it allows. That guarantee comes from the listener's own behavior, not
+from network isolation — `cloudflared` and `mcp-gateway` sit on the same Docker network,
+and nothing stops the tunnel reaching the private port except that no ingress rule names
+it.
+
+Authentication is enforced inside the gateway, not at the edge. A request arriving over
+the Cloudflare tunnel, the tailnet, or the LAN faces the same check. This is why the
+hostname can safely appear in local DNS.
+
+### Authentik setup
+
+Create an OAuth2/OpenID provider named `OpenBrain MCP`:
+
+| Setting | Value |
+|---|---|
+| Client type | Confidential |
+| Redirect URIs | The callback URLs claude.ai and ChatGPT present during connector setup |
+| Signing key | An RS256 certificate |
+| Scopes | `openid`, `profile`, `email`, `openbrain:read`, `openbrain:write` |
+| Subject mode | Based on user ID |
+
+Create an application with slug `openbrain-mcp`, and bind a policy restricting it to your
+own account or a dedicated group — without one, every Authentik user can mint a working
+token.
+
+Confirm that issued tokens carry `https://openbrain-mcp.streckercm.com/mcp` in `aud`. If
+they do not, add a scope mapping that sets it; the gateway rejects tokens whose audience
+is not this server.
+
+**`MCP_REQUIRED_SCOPES` is space-separated**, not comma-separated — for example
+`openbrain:read openbrain:write` — and defaults to `openbrain:read`. Setting it to an
+empty or whitespace-only value makes the required-scope set empty too, and the gateway
+then admits *any* authenticated token regardless of what scopes it carries. The audience
+check still gates who can obtain a usable token at all, so this isn't a full bypass — but
+it's an easy value to type by accident if you don't want scope enforcement, and the
+result should not be a surprise. Leave it set to at least `openbrain:read`.
+
+### Browser clients
+
+In claude.ai or ChatGPT, add a custom connector pointing at
+`https://openbrain-mcp.streckercm.com/mcp` and enter the Client ID and Secret from
+Authentik under Advanced settings. Dynamic client registration is not used.
+
+### Headless agents
+
+Agents with no browser use a static token instead. Add it to `MCP_STATIC_TOKENS` in
+`.env` — a comma-separated list, so each agent can carry its own token — then configure
+the client:
+
+```json
+{
+  "mcpServers": {
+    "openbrain": {
+      "type": "http",
+      "url": "https://openbrain-mcp.streckercm.com/mcp",
+      "headers": { "Authorization": "Bearer YOUR_TOKEN_HERE" }
+    }
+  }
+}
+```
+
+Keep the real token out of the tracked `.mcp.json`. Add the server at local scope
+(`claude mcp add-json`, the default scope, not `--scope project`) so it lives in
+`~/.claude.json` instead, or reference `${MCP_TOKEN}` in `headers` and set that
+environment variable outside the file.
+
+A static token receives **both** `openbrain:read` and `openbrain:write` — there is no
+per-token scope — and it **never expires**. Anyone holding one has full read/write access
+to the knowledge base for as long as it stays in `MCP_STATIC_TOKENS`. Treat it like a
+password. Rotate one by editing `MCP_STATIC_TOKENS` and running
+`docker compose restart mcp-gateway`.
+
+### Running without authentication
+
+On a fully private deployment, set `MCP_AUTH_ENABLED=false`. The gateway refuses to start
+if auth is enabled and the issuer, JWKS URL, or resource URI is unset, rather than
+falling back to serving unauthenticated.
 
 ## Additional Documentation
 
