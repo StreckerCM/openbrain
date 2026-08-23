@@ -23,8 +23,13 @@ published port. Which address you choose determines what stays reachable:
 | Value | PostgREST 3006 / Adminer 3008 / Postgres 5433 | web-ui 3010, docs 3009, gateway 3007 |
 |---|---|---|
 | `192.168.72.129` (LAN) | Still LAN-wide, as today | NPMplus keeps working |
-| CT 115 tailnet address | Tailnet only | NPMplus works **only if CT 127 is on the tailnet** |
+| CT 115 tailnet address | Tailnet only | NPMplus works — it is already on the tailnet (100.64.0.5) |
 | `127.0.0.1` | Closed | **NPMplus breaks** |
+
+**Tailnet status, checked 2026-08-23 from `pve`:** NPMplus is already enrolled as `npmplus`
+(100.64.0.5). CT 115 is **not** on the tailnet. So only one machine needs enrolling, not the two
+the plan assumed — and once CT 115 joins, `PRIVATE_BIND` can be its tailnet address and NPMplus
+reaches it over the tailnet with no LAN exposure at all. That is the option worth taking.
 
 The security win needs the tailnet. But note that the web UI reaches PostgREST over the Docker
 network (`proxy_pass http://postgrest:3000` in `web-ui/nginx.conf`), not the published port — so
