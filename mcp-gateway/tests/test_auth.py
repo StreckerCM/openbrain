@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 
+import httpx
+
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -656,3 +658,96 @@ async def test_concurrent_cold_start_requests_share_one_outbound_fetch(jwks_docu
     assert calls["n"] == 1, f"expected 1 outbound fetch, got {calls['n']}"
     assert unavailable == [], f"expected zero JWKSUnavailable, got {len(unavailable)}"
     assert all(r.key_id == KID for r in results if not isinstance(r, Exception))
+
+
+# ---------------------------------------------------------------------------
+# Authorization-server metadata shim
+#
+# claude.ai reads our RFC 9728 protected-resource document, then looks for
+# authorization-server metadata at THIS server's origin rather than following
+# the `authorization_servers` field to Authentik. Authentik 2026.5 serves only
+# the OIDC-style path, so that probe 404s and the client falls back to treating
+# the MCP host as its own AS. We serve Authentik's document here to bridge that.
+# ---------------------------------------------------------------------------
+
+AS_DOC = {
+    "issuer": ISSUER,
+    "authorization_endpoint": "https://auth.example.com/application/o/authorize/",
+    "token_endpoint": "https://auth.example.com/application/o/token/",
+    "jwks_uri": JWKS_URL,
+    "scopes_supported": ["openid", "openbrain:read", "openbrain:write"],
+}
+
+
+class _FakeASServer:
+    def __init__(self, document):
+        self.document = document
+        self.calls = 0
+        self.status = 200
+        self.client = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+
+    def _handle(self, request):
+        self.calls += 1
+        if self.status != 200:
+            return httpx.Response(self.status, text="down")
+        return httpx.Response(200, json=self.document)
+
+
+@pytest.fixture
+def as_server():
+    return _FakeASServer(dict(AS_DOC))
+
+
+def test_as_discovery_url_derives_from_issuer(jwt_config):
+    assert jwt_config.as_discovery_url == ISSUER + ".well-known/openid-configuration"
+
+
+def test_as_discovery_url_handles_issuer_without_trailing_slash():
+    cfg = auth.AuthConfig.from_env(dict(JWT_ENV, MCP_OAUTH_ISSUER=ISSUER.rstrip("/")))
+    assert cfg.as_discovery_url == ISSUER.rstrip("/") + "/.well-known/openid-configuration"
+
+
+def test_as_metadata_served_verbatim(jwt_config, as_server):
+    app = auth.make_as_metadata_app(jwt_config, lambda: as_server.client)
+    resp = TestClient(app).get("/.well-known/oauth-authorization-server")
+    assert resp.status_code == 200
+    assert resp.json() == AS_DOC
+    assert resp.json()["issuer"] == ISSUER, "issuer must stay Authentik's, not ours"
+
+
+def test_as_metadata_is_cached(jwt_config, as_server):
+    app = auth.make_as_metadata_app(jwt_config, lambda: as_server.client)
+    client = TestClient(app)
+    client.get("/.well-known/oauth-authorization-server")
+    client.get("/.well-known/oauth-authorization-server")
+    assert as_server.calls == 1
+
+
+def test_as_metadata_503_when_upstream_down_and_cache_cold(jwt_config, as_server):
+    as_server.status = 502
+    app = auth.make_as_metadata_app(jwt_config, lambda: as_server.client)
+    assert TestClient(app).get("/.well-known/oauth-authorization-server").status_code == 503
+
+
+def test_as_metadata_serves_stale_when_upstream_goes_down(jwt_config, as_server):
+    clock = FakeClock()
+    app = auth.make_as_metadata_app(jwt_config, lambda: as_server.client, ttl=100, clock=clock)
+    client = TestClient(app)
+    assert client.get("/.well-known/oauth-authorization-server").status_code == 200
+    as_server.status = 502
+    clock.advance(101)
+    resp = client.get("/.well-known/oauth-authorization-server")
+    assert resp.status_code == 200 and resp.json() == AS_DOC
+
+
+def test_listener_routes_as_metadata_separately_from_resource_metadata():
+    listener = auth.make_mcp_listener(_stub("mcp"), _stub("resource"), _stub("as"))
+    client = TestClient(listener)
+    assert client.get("/.well-known/oauth-authorization-server").json() == {"app": "as"}
+    assert client.get("/.well-known/oauth-protected-resource").json() == {"app": "resource"}
+    assert client.post("/mcp").json() == {"app": "mcp"}
+
+
+def test_listener_404s_as_metadata_when_not_configured():
+    listener = auth.make_mcp_listener(_stub("mcp"), _stub("resource"))
+    assert TestClient(listener).get("/.well-known/oauth-authorization-server").status_code == 404

@@ -19,6 +19,7 @@ import jwt
 ALL_SCOPES = frozenset({"openbrain:read", "openbrain:write"})
 
 _METADATA_PATH = "/.well-known/oauth-protected-resource"
+_AS_METADATA_PATH = "/.well-known/oauth-authorization-server"
 
 
 class AuthConfigError(Exception):
@@ -44,6 +45,16 @@ class AuthConfig:
     def metadata_url(self) -> str:
         parts = urlsplit(self.resource_uri)
         return urlunsplit((parts.scheme, parts.netloc, _METADATA_PATH, "", ""))
+
+    @property
+    def as_discovery_url(self) -> str:
+        """Where the authorization server publishes its own metadata.
+
+        authentik serves only the OIDC-style path — appended to the issuer —
+        and none of the RFC 8414 variants, so this is the one form that works.
+        """
+        base = self.issuer if self.issuer.endswith("/") else self.issuer + "/"
+        return base + ".well-known/openid-configuration"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AuthConfig":
@@ -340,6 +351,55 @@ def make_metadata_app(config: AuthConfig):
     return metadata_app
 
 
+def make_as_metadata_app(config: AuthConfig, http_getter, ttl: int = 3600,
+                         clock=time.monotonic):
+    """Serve the authorization server's own metadata from THIS origin.
+
+    Clients are supposed to read `authorization_servers` out of our RFC 9728
+    document and discover the AS from there. claude.ai instead probes
+    `/.well-known/oauth-authorization-server` on the resource server's origin —
+    the legacy shape from when an MCP server was its own AS — and on a 404
+    falls back to treating this host as the AS, producing an authorize URL that
+    does not exist.
+
+    So we answer that probe with authentik's document, fetched live.
+
+    The `issuer` field is passed through UNCHANGED, deliberately. authentik
+    stamps that same value as `iss` in the authorization response, and the
+    client compares the two per RFC 9207. Rewriting it to our own host would
+    make this document self-consistent and break that comparison instead.
+    """
+    state = {"doc": None, "at": None}
+
+    async def _fetch() -> bool:
+        try:
+            resp = await http_getter().get(config.as_discovery_url, timeout=10.0)
+            resp.raise_for_status()
+            doc = resp.json()
+        except Exception as exc:
+            print(f"[auth] AS metadata fetch failed: {exc}", flush=True)
+            return False
+        state["doc"], state["at"] = doc, clock()
+        return True
+
+    async def as_metadata_app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            return
+        expired = state["at"] is None or clock() - state["at"] >= ttl
+        if expired:
+            # A failure here is survivable while we still hold a document.
+            await _fetch()
+        if state["doc"] is None:
+            await _send_json(
+                send, 503,
+                {"error": "authorization server metadata unavailable"},
+            )
+            return
+        await _send_json(send, 200, state["doc"])
+
+    return as_metadata_app
+
+
 def _header(scope, name: bytes) -> str | None:
     for key, value in scope.get("headers", ()):
         if key.lower() == name:
@@ -447,11 +507,12 @@ def require_scopes(principal: Principal, config: AuthConfig) -> Principal:
     return principal
 
 
-def make_mcp_listener(mcp_app, metadata_app):
+def make_mcp_listener(mcp_app, metadata_app, as_metadata_app=None):
     """Build the ASGI app served on the public MCP port.
 
-    Only three things are reachable here: the MCP endpoint, the protected
-    resource metadata document, and a 404.
+    Only four things are reachable here: the MCP endpoint, the protected
+    resource metadata document, the authorization server metadata shim, and
+    a 404. `as_metadata_app` is optional; without it that path 404s.
     """
 
     async def listener(scope, receive, send):
@@ -460,6 +521,9 @@ def make_mcp_listener(mcp_app, metadata_app):
             # server.py owns the lifespan explicitly. Defensive only.
             return
         path = scope.get("path", "")
+        if as_metadata_app is not None and path.startswith(_AS_METADATA_PATH):
+            await as_metadata_app(scope, receive, send)
+            return
         if path.startswith(_METADATA_PATH):
             await metadata_app(scope, receive, send)
             return
