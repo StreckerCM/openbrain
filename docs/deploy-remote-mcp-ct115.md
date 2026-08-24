@@ -4,6 +4,12 @@
 **Source:** branch `development` (`da90e51`) — `main` is deliberately left at `8f45494` as the revert point
 **Written:** 2026-08-23
 
+> **Status 2026-08-23: Phases 0-4 are DONE on CT 115 and the claude.ai connector is live.**
+> A real Authentik JWT passes signature, issuer, expiry and audience validation; `POST /mcp`
+> returns 200 with zero `[auth]` rejections. What remains is Phase 5's off-network check and the
+> Cloudflare edge controls. Everything below has been executed at least once — the corrections
+> marked **Learned the hard way** are things that actually broke.
+
 This replaces the runbook at the end of `docs/superpowers/plans/2026-08-22-remote-mcp-oauth.md`,
 which assumed everything lands in one cutover. It does not have to, and it should not: the
 refactor and the authentication are independent risks and separating them tells you which one
@@ -253,7 +259,19 @@ Applications → Property Mappings → Create → **Scope Mapping**, three times
 |---|---|---|
 | OpenBrain read | `openbrain:read` | `return {}` |
 | OpenBrain write | `openbrain:write` | `return {}` |
-| OpenBrain audience | `openbrain:aud` | `return {"aud": "https://openbrain-mcp.streckercm.com/mcp"}` |
+
+**Learned the hard way — put the audience on `openbrain:read`, not its own scope.** The obvious
+design is a third `openbrain:aud` mapping. It does not work: authentik only evaluates a scope
+mapping when that scope is **requested**, and the gateway's own metadata advertises
+`scopes_supported: ["openbrain:read", "openbrain:write"]`. A client following that metadata never
+asks for `openbrain:aud`, the mapping never fires, `aud` is absent, and every token is rejected
+with a bare 401. So the read mapping's expression is:
+
+```python
+return {"aud": "https://openbrain-mcp.streckercm.com/mcp"}
+```
+
+`openbrain:read` is in `MCP_REQUIRED_SCOPES`, so any usable token necessarily carries it.
 
 The third one is the load-bearing piece and the most likely thing to get wrong. The gateway
 rejects any token whose `aud` is not exactly `https://openbrain-mcp.streckercm.com/mcp`, because
@@ -381,6 +399,84 @@ ssh streckercm@192.168.72.102 "sudo pct exec 126 -- journalctl -u cloudflared -n
 
 ---
 
+## Phase 4b — The claude.ai connector
+
+Settings → Connectors → Add custom connector.
+
+| Field | Value |
+|---|---|
+| **URL** | `https://openbrain-mcp.streckercm.com/mcp` — **the `/mcp` path is required** |
+| Advanced → OAuth Client ID | from the authentik provider |
+| Advanced → OAuth Client Secret | from the authentik provider |
+
+**Learned the hard way — the URL must include `/mcp`.** Entering the bare host gets you a long way
+before failing: both `.well-known` documents live at the host root, so OAuth discovery succeeds
+and the consent flow completes, and only then does claude.ai `POST /` and get a 404. The error it
+shows is *"Couldn't connect to the server. Check that the URL points to a valid MCP server"*,
+which reads like a networking or auth fault rather than a missing path. The gateway log is
+unambiguous — `POST / 404` next to `GET /.well-known/... 200`.
+
+**Learned the hard way — the gateway must serve authorization-server metadata itself.** claude.ai
+reads our RFC 9728 document, then probes `/.well-known/oauth-authorization-server` on the
+**resource server's** origin rather than following the `authorization_servers` field to authentik.
+authentik 2026.5 serves only the OIDC-style discovery path, so there is nothing to redirect to
+either. PR #21 added a shim on the gateway that returns authentik's document, `issuer` unchanged —
+rewriting it would break the RFC 9207 comparison the client makes against `iss` in the
+authorization response. Without that shim the flow dead-ends at
+`https://openbrain-mcp.streckercm.com/authorize`, which does not exist.
+
+**On consent flows.** With `default-provider-authorization-explicit-consent`, cancelling the
+consent prompt logs you out of authentik and dumps you at `/if/user/#/library`, which looks like a
+redirect-URI misconfiguration and is not. If you are the only user, the implicit-consent flow
+removes the failure mode entirely.
+
+## Diagnostics that actually work
+
+**Gateway auth decisions.** Use `grep -F` and do not use a short `--tail`; the interesting lines
+scroll away fast:
+
+```bash
+ssh docker@192.168.72.129 'cd /docker/openbrain && sudo docker compose logs mcp-gateway 2>&1 | grep -F "[auth]" | tail -20'
+```
+
+Only four paths log: JWKS fetch failure, malformed token, missing `kid`, and JWT decode failure
+(where audience, issuer, expiry and signature rejections all surface). **A request with no
+`Authorization` header logs nothing** — so a 401 with no `[auth]` line means the client never sent
+a credential, which is a client-config problem, not a token problem. Success is also silent.
+
+**What the client is actually requesting** — this is what caught the missing `/mcp` path:
+
+```bash
+ssh docker@192.168.72.129 'cd /docker/openbrain && sudo docker compose logs --since 20m mcp-gateway 2>&1 | grep -E "INFO:|\[auth\]" | tail -25'
+```
+
+**authentik request and flow logs** — it runs natively on CT 118, not in docker:
+
+```bash
+ssh streckercm@192.168.72.102 "sudo pct exec 118 -- journalctl -u authentik-server --since '20 min ago' --no-pager | grep -iE 'authorize|redirect|invalid'"
+```
+
+**authentik provider config, read directly** — faster and more reliable than reading it back out
+of the admin UI:
+
+```bash
+ssh streckercm@192.168.72.102 "sudo pct exec 118 -- su postgres -c \"psql -d authentik -tAF'|' -c \\\"SELECT cp.name, af.slug, af.designation, p.issuer_mode, p.client_type, (p.signing_key_id IS NOT NULL) FROM authentik_providers_oauth2_oauth2provider p JOIN authentik_core_provider cp ON cp.id=p.provider_ptr_id LEFT JOIN authentik_flows_flow af ON af.flow_uuid=cp.authorization_flow_id\\\"\""
+```
+
+The redirect URI column is `_redirect_uris` (leading underscore), and scope mappings join through
+`authentik_core_provider_property_mappings`.
+
+**Testing the public hostname from inside the LAN.** Technitium is authoritative for
+`streckercm.com` and returns NXDOMAIN for `openbrain-mcp`, which is the intended public-only
+state. Bypass it rather than adding a local record:
+
+```bash
+curl --resolve openbrain-mcp.streckercm.com:443:104.21.74.64 https://openbrain-mcp.streckercm.com/.well-known/oauth-protected-resource
+```
+
+That genuinely leaves the network and returns through the tunnel, so it is a real public-path
+test, not a LAN shortcut.
+
 ## Phase 5 — Verification
 
 The first three are the ones that matter. An unauthenticated request must be rejected from
@@ -414,8 +510,37 @@ Finally, at the Cloudflare edge:
 
 ---
 
+## Phase 5 status
+
+Done, verified 2026-08-23:
+
+| Check | Result |
+|---|---|
+| Unauthenticated `POST /mcp` from inside the LAN, resolving publicly | **401** |
+| Valid token over the Cloudflare path | **200**, 19 tools |
+| `/api/bulk-delete` over the public hostname | **404** |
+| `GET /` over the public hostname | **404** |
+| Both metadata path forms | **200** |
+| claude.ai connector, full OAuth flow | **200/202**, zero `[auth]` rejections |
+| Web UI create / edit / archive / search | unaffected |
+| Row counts before and after Phase 1 | identical (117 / 31 / 8 / 210) |
+
+Still outstanding:
+
+- **From a phone on cellular** — the one path never exercised. Everything so far came from the LAN
+  or from Anthropic's servers.
+- **A long streaming MCP response through the tunnel** — confirm no truncation or idle timeout.
+- **Cloudflare rate limiting** scoped to `/mcp`, threshold well above a single agent's burst.
+- **Cloudflare WAF in log-only mode.** Do not set anything to block yet: MCP payloads are JSON-RPC
+  carrying code and SQL fragments, which is exactly what managed rulesets match. Review after a
+  week and enable blocking only for rules with no false positives.
+
 ## Known limits you are accepting
 
+- `MCP_RESOURCE_URI` is `https://openbrain-mcp.streckercm.com/mcp`, but the Claude Code clients
+  still connect through `brain.streckercm.com`. That works only because static tokens skip
+  audience validation entirely. If those clients are ever moved to OAuth, they must use the
+  `openbrain-mcp` hostname or their tokens will fail the audience check.
 - Any valid token gets **all 19 tools**, full read and write. No per-tool scoping.
 - A static token carries **both scopes and never expires**. Rotate by editing `MCP_STATIC_TOKENS`.
 - `MCP_REQUIRED_SCOPES=""` disables scope enforcement entirely. The audience check still gates
