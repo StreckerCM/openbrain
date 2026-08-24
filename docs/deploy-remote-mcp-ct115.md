@@ -263,31 +263,51 @@ rather than derived from the request.
 
 ### 3b. Provider
 
-Applications → Providers → Create → **OAuth2/OpenID Provider**:
+Applications → Providers → Create → **OAuth2/OpenID Provider**. Field list below is the complete
+set from Authentik 2026.5.2's own API schema (`/api/v3/schema/`, `OAuth2ProviderRequest`), not a
+summary. Only four are required by Authentik — `name`, `authorization_flow`, `invalidation_flow`,
+`redirect_uris` — but several optional ones are load-bearing for us.
 
-| Setting | Value |
+**Must be set to these values, or the integration fails:**
+
+| Field | Value | Why |
+|---|---|---|
+| **Issuer mode** | **`per_provider`** — "Each provider has a different issuer, based on the application slug" | With `global` the `iss` claim becomes `https://auth.streckercm.com/application/o/` with no slug. The gateway compares `iss` **exactly, with no normalisation**, against `https://auth.streckercm.com/application/o/openbrain-mcp/`. Wrong value → every token 401s with nothing indicating why. |
+| **Signing Key** | an **RS256** certificate | **Leaving this empty is not neutral.** Authentik then signs symmetrically with the client secret (HS256). The gateway pins `algorithms=["RS256"]` and validates via JWKS, so an unsigned-by-certificate provider fails every request. |
+| Client type | `confidential` | claude.ai stores a client secret. |
+| Property mappings | `openid`, `profile`, `email` + the three from 3a | The audience mapping must be here or `aud` never appears. |
+| Redirect URIs | see below | Required field. |
+
+**Leave at defaults unless you have a reason:**
+
+| Field | Note |
 |---|---|
-| Name | `OpenBrain MCP` |
-| Authorization flow | your usual explicit-consent flow |
-| Client type | **Confidential** |
-| Client ID / Secret | generated — copy both, they go into the claude.ai connector |
-| Redirect URIs | see below |
-| Signing key | an **RS256** certificate (the gateway validates via JWKS; HS256 will not work) |
-| Scopes | `openid`, `profile`, `email`, plus the three mappings from 3a |
-| Subject mode | Based on the user's ID |
+| Authorization flow | Your explicit-consent flow. Required. |
+| Invalidation flow | Required in 2026.5 — the default provider invalidation flow is fine. |
+| Authentication flow | Optional; blank uses the default. |
+| Client ID / Secret | Auto-generated. **Copy both** — they go into the claude.ai connector. |
+| Grant types | Needs `authorization_code` and `refresh_token`. |
+| Access code validity | Default (~1 min) is fine. |
+| Access token validity | Default (~5 min) is fine; refresh covers longer sessions. Raising it lengthens the window a leaked token stays usable. |
+| Refresh token validity | Default (~30 days). |
+| Subject mode | Any works — the gateway only requires `sub` to be present. `hashed_user_id` is the default. |
+| Include claims in id_token | Irrelevant here; the gateway validates the **access** token. |
+| Encryption key | Leave empty. An encrypted JWT is not a JWS the gateway can verify. |
+| Logout URI / method | Not used. |
+| JWT federation sources/providers | Not used. |
 
-Redirect URIs — one per line:
+Redirect URIs are entries of `{matching_mode, url}`, where matching mode is `strict` or `regex`:
 
-```
-https://claude.ai/api/mcp/auth_callback
-https://claude.com/api/mcp/auth_callback
-```
+| Matching mode | URL |
+|---|---|
+| `strict` | `https://claude.ai/api/mcp/auth_callback` |
+| `strict` | `https://claude.com/api/mcp/auth_callback` |
 
-The `.com` variant is Anthropic's documented future callback; allowlisting both now avoids a
-silent break later. If you also want Claude Code to use OAuth rather than the static token, add
-loopback entries — Claude Code redirects to `http://localhost:PORT/callback` and
-`http://127.0.0.1:PORT/callback` on an ephemeral port, so either pin the port with
-`--callback-port` and register that exact URI, or use regex-style redirect matching.
+The `.com` entry is Anthropic's documented future callback — allowlisting it now avoids a silent
+break later. If you also want Claude Code to use OAuth instead of its static token, add a `regex`
+entry such as `http://(localhost|127\.0\.0\.1):[0-9]+/callback`, because Claude Code redirects to
+an ephemeral loopback port. Pinning `--callback-port` and using a `strict` entry is tighter if you
+prefer.
 
 ### 3c. Application
 
