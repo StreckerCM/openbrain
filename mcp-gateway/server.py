@@ -1548,6 +1548,7 @@ async def _authenticate(authorization, config):
 mcp_listener_app = auth.make_mcp_listener(
     auth.make_auth_middleware(mcp_asgi, AUTH_CONFIG, _authenticate),
     auth.make_metadata_app(AUTH_CONFIG),
+    auth.make_as_metadata_app(AUTH_CONFIG, _get_http),
 )
 
 # The API listener keeps the existing Starlette app. It is private-only —
