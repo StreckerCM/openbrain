@@ -530,10 +530,92 @@ Still outstanding:
 - **From a phone on cellular** — the one path never exercised. Everything so far came from the LAN
   or from Anthropic's servers.
 - **A long streaming MCP response through the tunnel** — confirm no truncation or idle timeout.
-- **Cloudflare rate limiting** scoped to `/mcp`, threshold well above a single agent's burst.
-- **Cloudflare WAF in log-only mode.** Do not set anything to block yet: MCP payloads are JSON-RPC
-  carrying code and SQL fragments, which is exactly what managed rulesets match. Review after a
-  week and enable blocking only for rules with no false positives.
+- **Cloudflare edge controls** — see the section below. Short version: the WAF is a paid add-on on
+  this account and is not worth buying for this endpoint.
+
+## Cloudflare edge controls — decided 2026-08-24
+
+**The WAF is a paid add-on on this account, and we are not buying it.** The plan called for
+enabling it in log-only mode, and log-only was always going to be permanent: MCP payloads are
+JSON-RPC bodies carrying code, SQL fragments, shell snippets and file paths — routine content for
+a knowledge base about software, and exactly what managed rulesets match on. A control that was
+never going to be allowed to block is not much of a loss.
+
+### Measured traffic baseline
+
+From the gateway's own logs, before setting any threshold:
+
+| | |
+|---|---|
+| Peak | **10 requests/min** (the claude.ai connector handshake) |
+| Median | 1 request/min |
+| Realistic busy agent | 60-120/min, extrapolated, not yet observed |
+
+Measure again rather than trusting these if usage changes:
+
+```bash
+ssh docker@192.168.72.129 'cd /docker/openbrain && sudo docker compose logs --since 2h -t mcp-gateway 2>&1 | grep -cE "POST /mcp|GET /mcp"'
+```
+
+### Rate limiting — optional, and low value here
+
+Free tier includes one rate limiting rule. If used on this endpoint:
+
+```
+(http.host eq "openbrain-mcp.streckercm.com" and http.request.uri.path contains "/mcp")
+```
+
+Threshold **300/min per client IP**, action Block — roughly 30x the observed peak, so no real
+session trips it. Free-tier rules are limited to short counting periods and the Block action.
+
+The better rule is not available on this plan: **rate limit only requests that return 401**, which
+targets credential guessing and can never touch a working client, since working clients return
+200. Response-status matching is a paid feature.
+
+Two reasons this is optional rather than important:
+
+- Brute-forcing a 68-character static token or forging an RS256 signature is not a realistic
+  attack, and unauthenticated requests cost the gateway a cheap 401.
+- All legitimate claude.ai traffic arrives from Anthropic's shared egress IPs, so an IP-based
+  volume limit is both easy to trip legitimately and weak against anything distributed.
+
+Consider spending the single free rule somewhere with a weaker application layer instead —
+`brain.streckercm.com` is a candidate, since the write API behind it has no authentication of its
+own.
+
+### Do not enable Bot Fight Mode
+
+It is a zone-level toggle, so it would apply to `auth`, `brain` and everything else in
+`streckercm.com` — and claude.ai's servers are a bot by any reasonable definition. It would block
+the thing this whole project exists to enable.
+
+### Scoping rules to one subdomain
+
+The Security panel presents zone-wide settings, which is misleading. What is scopable:
+
+| Control | Per-hostname? |
+|---|---|
+| Rate limiting rules | **Yes** — expression-based, add `http.host eq "openbrain-mcp.streckercm.com"` |
+| WAF custom rules | **Yes** — same mechanism (Free tier includes a small number) |
+| WAF managed ruleset | Zone-wide, but overrides can be scoped by expression on paid plans |
+| Bot Fight Mode, Security Level, Browser Integrity Check | **No** — zone toggles. Per-hostname variation needs Configuration Rules, a paid feature. |
+
+Prefer scoped rules over zone toggles regardless of plan: `auth.streckercm.com` shares this zone,
+and Authentik would not enjoy an aggressive Security Level.
+
+### What is actually protecting this endpoint
+
+Worth stating plainly, because it is the reason the paid tiers are not needed:
+
+| Layer | Load-bearing? |
+|---|---|
+| Outbound-only tunnel — no listening port on the public interface | **Yes**, structural |
+| App-level auth: RS256 signature, audience, issuer, expiry, fail-closed startup | **Yes** |
+| MCP listener 404s everything outside `/mcp` and the metadata prefix | **Yes** |
+| Write API not published to the host at all | **Yes** |
+| Cloudflare baseline DDoS absorption (included free) | **Yes** |
+| WAF managed rules | Marginal |
+| Rate limiting | Marginal |
 
 ## Known limits you are accepting
 
