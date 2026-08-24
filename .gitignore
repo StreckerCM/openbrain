@@ -25,3 +25,10 @@ __pycache__/
 
 # Cloudflare tunnel credentials — never commit
 cloudflared/*.json
+
+# Project-scope MCP config. OpenBrain is configured at user scope in
+# ~/.claude.json instead, and the README deliberately advises keeping bearer
+# tokens out of a tracked file. Ignored so a project-scope config carrying a
+# credential cannot be committed by accident. Remove this line if a shared,
+# token-free project config is ever wanted.
+.mcp.json
