@@ -1,6 +1,6 @@
 # OpenBrain handoff
 
-**Updated:** 2026-08-24
+**Updated:** 2026-08-30
 
 Read this first if you're picking up OpenBrain work. It covers what's deployed, what's open, and
 the things that cost time to discover.
@@ -12,14 +12,24 @@ PostgREST, Adminer, and the write REST API stay on the LAN. The claude.ai connec
 
 | Item | State |
 |---|---|
-| Open PR | **#22** — `development` → `main`, 40 commits, 81 tests |
+| Open PR | **#22** — `development` → `main`, 43 commits, 91 tests |
 | `main` | Held back deliberately as the revert point |
 | `development` | Current work; CT 115 runs from this branch |
-| CT 115 deployed at | `a09af69` — four commits behind `development`, all docs plus one `.gitignore` line. Nothing functional is missing. |
+| CT 115 deployed at | `c166360` — **up to date with `development`** as of 2026-08-30 |
 
 Deploy phases 0 through 4 are done. Phase 5 has one item left: **send a request from a phone on
 cellular.** Every test so far ran from the LAN or from Anthropic's servers, so that path is
 unproven.
+
+**Shipped 2026-08-30 (PR #23):** `update_memory`, bringing the tool count to **20**. Memories
+previously could only be corrected by archive-and-re-save, which loses the ID and so breaks
+`[[name]]` references and project links. The same PR moved the `VALID_MEMORY_TYPES` guard into
+`_db_update_memory` — it was enforced on insert but not on update, so `PUT /api/memories/{id}`
+could already write a type outside the vocabulary, and such a row silently drops out of
+`recall_memory`'s `memory_type` filter and the web UI facets. Verified live against
+`brain.streckercm.com`: guard rejects, `memory_id` alias works, partial update leaves untouched
+fields alone, and re-embedding regenerates (the edited memory returns at 0.61 similarity for a
+query phrased against its new wording).
 
 ## How to reach things
 
@@ -50,9 +60,89 @@ CT 115 is **not** on the tailnet. NPMplus already is. `PRIVATE_BIND` is currentl
 first confirm nothing queries PostgREST directly — `docs/readme.md` advertises it as a second agent
 interface.
 
+## UNVERIFIED — test this first
+
+**A SessionStart hook was wired up on 2026-08-30 but has never run in a real session.** It was
+tested only by piping hook-shaped JSON into it by hand. Confirming it fires for real is the first
+thing to do in the next session, and it needs a *fresh* session — the hook runs at session start,
+so the session that created it could not exercise it.
+
+**How to test.** Close this session. Open a new one in `E:\GitHub\openbrain`. Near the top of the
+context you should see a block headed `## OpenBrain (pre-loaded)` saying the directory maps to the
+**OpenBrain** project, followed by that project's memories and a list of recent cross-project ones.
+Ask something like "what do you already know about this project?" — the answer should draw on those
+memories without any tool call.
+
+Then check the negative case: open a session in `E:\GitHub\APEX-TestUtility` (or any repo in the
+Salesforce list below) and confirm **no** OpenBrain block appears and no `mcp__openbrain__*` tools
+are present.
+
+If nothing appears in either case, run the hook by hand to see the error — it is written to exit 0
+silently on every failure path, which is right for a session start but hides problems:
+
+```bash
+node -e 'const os=require("os"),p=require("path"),fs=require("fs");const B=String.fromCharCode(92);
+const f=p.join(os.tmpdir(),"ob.json");
+fs.writeFileSync(f,JSON.stringify({cwd:"E:"+B+"GitHub"+B+"openbrain",source:"startup"}));console.log(f)'
+# then feed that file to the hook on stdin:
+node ~/.claude/hooks/openbrain-preload.mjs < <that path>
+```
+
+Note the escaping trap: building that JSON with `echo` or `printf` in Git Bash eats the backslashes
+and produces an invalid `cwd`, which looks exactly like a hook bug. Build it with `JSON.stringify`
+and `String.fromCharCode(92)` as above.
+
+## How agents reach OpenBrain unprompted
+
+Two layers, so recall does not depend on the model remembering to ask.
+
+**`~/.claude/CLAUDE.md`** — a user-level policy loaded into every session. It opens with a guard
+clause: the section applies only when `mcp__openbrain__*` tools are present, so it is inert
+wherever the server is off. It says when to recall (questions turning on recorded history rather
+than readable code), when to save (decisions with rationale, hard-won constraints, carry-forward
+state), and where the boundary sits against the per-project file memory under
+`~/.claude/projects/*/memory/` — local is *how to work with me*, OpenBrain is *the work itself*.
+
+**`~/.claude/hooks/openbrain-preload.mjs`** — a SessionStart hook registered in
+`~/.claude/settings.json` under matcher `startup|resume|clear`, timeout 15s. It maps the cwd
+basename to a project by slug, pulls that project's 12 most recent memories plus the 8 most recent
+overall, and returns them as `hookSpecificOutput.additionalContext`. Previews cap at 240 characters
+with a pointer to `recall_memory` / `search_knowledge` for full text.
+
+CLAUDE.md is an instruction the model may skip when it feels confident; the hook is deterministic.
+So recall is automatic and saving stays model-discretion, since only the model knows what is worth
+keeping.
+
+Three implementation facts worth not rediscovering:
+
+- The gateway's Streamable HTTP transport is **stateless** — it returns no `mcp-session-id`, so a
+  bare `tools/call` works with no `initialize` handshake. The hook depends on this. Replies still
+  use SSE framing (`event: message` / `data: {...}`) even for a single response.
+- The hook reads the URL and bearer token out of `~/.claude.json` at runtime rather than embedding
+  them, so there is one copy of the token.
+- Only `/mcp` is reachable from outside. `brain.streckercm.com` serves the SPA as a catch-all, so
+  probing `/rest/memories` returns 200 with web-UI HTML — that is **not** evidence PostgREST is
+  exposed.
+
+**Per-project gating.** Claude Code records per-directory opt-outs at
+`projects["<path>"].disabledMcpServers` in `~/.claude.json` (path keys use forward slashes). The
+hook reads that same key, so both layers agree. As of 2026-08-30 `openbrain` is disabled in nine
+Salesforce repos: `APEX-Documentation-Project-FY2026`, `APEX-TestUtility`, `Chris_Dev_Org`,
+`Custom_Product_Configuation_LWC`, `SF-Deployment-GUID`, `Salesforce_to_SharePoint_Integration`,
+`hipoint_App_Integration`, `Salesforce-Sandbox-Utility`, `Salesforce-to-SQL-Server-Interface`.
+`MilestoneWidget` is an SFDX repo but was deliberately left enabled, because it is an OpenBrain
+project with its own memories.
+
+Do not confuse `disabledMcpServers` with `disabledMcpjsonServers` — the latter is the separate
+approval list for servers defined in a repo's `.mcp.json`.
+
+An `OpenBrain` project was created in the store on 2026-08-30 (id 120); before that this repo
+matched nothing and got only the cross-project fallback. Repos whose directory name differs from
+their project name still get only the fallback until a mapping table is added.
+
 ## Two front doors
 
-Both terminate at the same gateway, the same 19 tools, and the same database.
+Both terminate at the same gateway, the same 20 tools, and the same database.
 
 | Client | Endpoint | Credential |
 |---|---|---|
@@ -137,6 +227,14 @@ flow dead-ends at a URL that doesn't exist. See PR #21.
 **Cancelling an Authentik consent prompt logs you out** and drops you at `/if/user/#/library`, which
 looks like a redirect-URI misconfiguration.
 
+**`sudo` does not cover the shell around the command.** `sudo ls -lh /root/openbrain-*.sql.gz`
+reports `No such file or directory` **even when the files exist** — the shell expands the glob as
+`docker`, cannot read `/root`, and passes the literal pattern through. Likewise `sudo wc -l <
+/root/file` fails on the redirect. Mid-deploy this reads as "the backup was never written," which
+is exactly when you might re-run a dump or press on without a rollback artifact. Use
+`sudo ls -lh /root/ | grep openbrain`, or wrap the whole thing in `sudo sh -c "... > /root/out"`.
+Piping into `sudo tee` works, because `tee` is the elevated command.
+
 **Shell scripts need LF endings.** `.gitattributes` enforces this. Without it, `core.autocrlf` gives
 `entrypoint.sh` a CRLF shebang and the container dies with `exec /entrypoint.sh: no such file or
 directory`. Only Windows clones hit this.
@@ -146,7 +244,7 @@ directory`. Only Windows clones hit this.
 Items C, D, and E in `docs/superpowers/plans/2026-08-22-remote-mcp-oauth.md` are open. Item C is the
 substantive one.
 
-**C. Move the MCP tools onto `db.py`.** The 19 MCP tools contain 32 raw SQL sites reimplementing
+**C. Move the MCP tools onto `db.py`.** The 20 MCP tools contain 32 raw SQL sites reimplementing
 logic the REST handlers already call through the shared layer, which has 6. Link, unlink, archive,
 unarchive, project create and update, and search each exist twice. An audit on 2026-08-22 found no
 behavioural drift between the copies, but search is where drift would hurt most — a divergence there
@@ -173,7 +271,7 @@ Two smaller items:
 
 ## Limits to keep in mind
 
-- Any valid token gets **all 19 tools**, full read and write. There's no per-tool scoping.
+- Any valid token gets **all 20 tools**, full read and write. There's no per-tool scoping.
 - Static tokens carry both scopes and never expire.
 - Setting `MCP_REQUIRED_SCOPES=""` disables scope enforcement. The audience check still gates who
   can obtain a usable token.
