@@ -559,6 +559,59 @@ async def save_memory(
 
 
 @mcp.tool()
+async def update_memory(
+    id: int | None = None,
+    memory_id: int | None = None,
+    memory_type: str | None = None,
+    name: str | None = None,
+    content: str | None = None,
+    description: str | None = None,
+    project: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Update an existing memory. Only provided fields are changed.
+
+    Prefer this over archiving and re-saving when a memory is merely wrong or
+    out of date: the ID survives, so `[[name]]` references and project links
+    keep resolving.
+
+    Changing text fields (name, content, description, memory_type) triggers
+    re-embedding so semantic search stays current. Changing `project` moves the
+    provenance label only — use link_to_project / unlink_from_project to change
+    which projects the memory is actually linked to.
+
+    Args:
+        id: Memory ID (alias: memory_id)
+        memory_id: Alias for id
+        memory_type: New type — one of: user, feedback, project, reference
+        name: New name
+        content: New content
+        description: New one-line description
+        project: New provenance project label
+    """
+    try:
+        mid = _resolve_id(id, memory_id, "memory_id")
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if mid is None:
+        return json.dumps({"error": "Must provide 'id' (or alias 'memory_id')"})
+    app = _get_app_ctx(ctx)
+    fields = {}
+    if memory_type is not None: fields["memory_type"] = memory_type
+    if name is not None: fields["name"] = name
+    if content is not None: fields["content"] = content
+    if description is not None: fields["description"] = description
+    if project is not None: fields["project"] = project
+    try:
+        result = await _db_update_memory(app.pool, mid, **fields)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    if result is None:
+        return json.dumps({"error": f"Memory {mid} not found, not active, or no fields to update"})
+    return json.dumps(result, default=str, indent=2)
+
+
+@mcp.tool()
 async def recall_memory(
     query: str,
     memory_type: str | None = None,
@@ -1092,7 +1145,10 @@ async def rest_memories_update(request: Request) -> JSONResponse:
     fields = {k: v for k, v in body.items() if k in {"memory_type", "name", "content", "description", "project"}}
     if not fields:
         return _err("No valid fields to update", 400)
-    result = await _db_update_memory(_get_pool(), mid, **fields)
+    try:
+        result = await _db_update_memory(_get_pool(), mid, **fields)
+    except ValueError as e:
+        return _err(str(e), 400)
     if result is None:
         return _err(f"Memory {mid} not found or not active", 404)
     return _json(result)

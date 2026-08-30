@@ -12,9 +12,11 @@ are this module's public API despite the leading underscore; renaming them is
 follow-on work, deliberately not bundled with a pure move.
 
 VALID_MEMORY_TYPES lives here rather than in server.py because it constrains
-what `_db_save_memory` will write. In server.py it was defined 800 lines
-BELOW its first use — legal only because the reference sits inside a function
-body, and a hazard waiting for someone to hoist that call to module scope.
+what `_db_save_memory` and `_db_update_memory` will write — both write paths
+enforce it here, so no caller can reach the column past it. In server.py it
+was defined 800 lines BELOW its first use — legal only because the reference
+sits inside a function body, and a hazard waiting for someone to hoist that
+call to module scope.
 """
 import os
 
@@ -150,6 +152,13 @@ async def _db_update_memory(pool: asyncpg.Pool, mid: int, **fields) -> dict | No
     """Partial update of a memory. Returns updated row or None."""
     allowed = {"memory_type", "name", "content", "description", "project"}
     text_fields = {"name", "content", "description", "memory_type"}
+    # Same guard _db_save_memory applies on insert. Without it an update is a
+    # back door around the type vocabulary: recall_memory's memory_type filter
+    # and the web UI's type facets both silently stop matching a row set to
+    # something outside the set.
+    mtype = fields.get("memory_type")
+    if mtype is not None and mtype not in VALID_MEMORY_TYPES:
+        raise ValueError(f"memory_type must be one of: {', '.join(sorted(VALID_MEMORY_TYPES))}")
     sets = []
     params = []
     idx = 1
