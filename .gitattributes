@@ -4,3 +4,7 @@
 # "/bin/sh\r" and the container dies with "no such file or directory".
 # The deployed Linux host never sees this; a Windows clone always does.
 *.sh text eol=lf
+
+# The hook carries a #!/usr/bin/env node shebang; CRLF would break it if it is
+# ever made executable on a Unix host. Same failure mode as the .sh rule above.
+hooks/*.mjs text eol=lf

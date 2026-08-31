@@ -155,6 +155,10 @@ than readable code), when to save (decisions with rationale, hard-won constraint
 state), and where the boundary sits against the per-project file memory under
 `~/.claude/projects/*/memory/` — local is *how to work with me*, OpenBrain is *the work itself*.
 
+The hook is vendored at `hooks/openbrain-preload.mjs` in this repo as of 2026-08-31 — that copy is
+the source of truth, and `hooks/README.md` covers installing and registering it. Claude Code only
+reads `~/.claude/`, so edits there must be copied back, and vice versa.
+
 **`~/.claude/hooks/openbrain-preload.mjs`** — a SessionStart hook registered in
 `~/.claude/settings.json` under matcher `startup|resume|clear`, timeout 15s. It maps the cwd
 basename to a project by slug, pulls that project's 12 most recent memories plus the 8 most recent
