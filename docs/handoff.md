@@ -1,6 +1,6 @@
 # OpenBrain handoff
 
-**Updated:** 2026-08-30
+**Updated:** 2026-08-31
 
 Read this first if you're picking up OpenBrain work. It covers what's deployed, what's open, and
 the things that cost time to discover.
@@ -60,25 +60,81 @@ CT 115 is **not** on the tailnet. NPMplus already is. `PRIVATE_BIND` is currentl
 first confirm nothing queries PostgREST directly — `docs/readme.md` advertises it as a second agent
 interface.
 
-## UNVERIFIED — test this first
+## Session preload hook — fixed 2026-08-31, one step short of proven
 
-**A SessionStart hook was wired up on 2026-08-30 but has never run in a real session.** It was
-tested only by piping hook-shaped JSON into it by hand. Confirming it fires for real is the first
-thing to do in the next session, and it needs a *fresh* session — the hook runs at session start,
-so the session that created it could not exercise it.
+The SessionStart hook wired up on 2026-08-30 **never ran successfully.** It failed on every session
+from the moment it was registered until 2026-08-31, and reported nothing while doing so.
 
-**How to test.** Close this session. Open a new one in `E:\GitHub\openbrain`. Near the top of the
-context you should see a block headed `## OpenBrain (pre-loaded)` saying the directory maps to the
-**OpenBrain** project, followed by that project's memories and a list of recent cross-project ones.
-Ask something like "what do you already know about this project?" — the answer should draw on those
-memories without any tool call.
+**Root cause: bash ate the backslashes in the `command` string.** `~/.claude/settings.json` held
 
-Then check the negative case: open a session in `E:\GitHub\APEX-TestUtility` (or any repo in the
-Salesforce list below) and confirm **no** OpenBrain block appears and no `mcp__openbrain__*` tools
-are present.
+```json
+"command": "C:\\nvm4w\\nodejs\\node.exe C:\\Users\\streckercm\\.claude\\hooks\\openbrain-preload.mjs"
+```
 
-If nothing appears in either case, run the hook by hand to see the error — it is written to exit 0
-silently on every failure path, which is right for a session start but hides problems:
+That is correct JSON for a Windows path, and it is still wrong, because Claude Code runs hook
+commands **through bash** — which collapses `\n`, `\U`, `\c` and the rest before anything executes.
+The debug log shows the hook firing on schedule and dying on the first token:
+
+```
+Hook SessionStart:startup (SessionStart) error:
+/usr/bin/bash: line 1: C:nvm4wnodejsnode.exe: command not found
+```
+
+This is the same escaping trap documented below for building test JSON in Git Bash. It applies to
+the `command` field too, where it is easier to miss — the JSON looks right, and the hook is
+registered correctly.
+
+**Fix: forward slashes.** Windows accepts them and bash leaves them alone.
+
+```json
+"command": "C:/nvm4w/nodejs/node.exe C:/Users/streckercm/.claude/hooks/openbrain-preload.mjs"
+```
+
+Applied 2026-08-31. The pre-fix file is at `~/.claude/settings.json.bak`. The corrected string was
+run through bash by hand and returns the full `additionalContext` payload.
+
+**What is still unproven:** no real session has consumed that output yet. The script's logic was
+already verified by hand — the positive case returns the OpenBrain project block, the negative case
+(`E:\GitHub\APEX-TestUtility`) returns nothing — but end-to-end delivery into a live context has
+never been observed, because until now the command never executed.
+
+**How to finish the test.** Open a *fresh* session in `E:\GitHub\openbrain` — the hook runs at
+session start, so no session can test its own registration. Near the top of the context you should
+see a block headed `## OpenBrain (pre-loaded)` naming the **OpenBrain** project, followed by that
+project's memories and recent cross-project ones. Ask "what do you already know about this
+project?" — the answer should draw on them with no tool call. Then confirm the negative case in a
+Salesforce repo: no OpenBrain block, no `mcp__openbrain__*` tools.
+
+**Where to look when it fails.** The hook exits 0 on every failure path — a session must never fail
+to start because the brain host is down — but as of 2026-08-31 it is no longer silent about it.
+
+Errors are always appended to `~/.claude/hooks/openbrain-preload.log`, with the `cause` unwrapped so
+a network failure names the real reason instead of a bare `TypeError: fetch failed`. Routine skips
+(server disabled for this directory, nothing stored yet) are not logged, so a non-empty log means
+something is genuinely wrong. It rotates to `.log.1` past 256 KB.
+
+For a full trace set `OPENBRAIN_HOOK_DEBUG=1` or pass `--debug`; every decision then goes to stderr
+*and* the log — resolved cwd, project count, which project matched, and the emitted payload size.
+
+```bash
+tail ~/.claude/hooks/openbrain-preload.log
+OPENBRAIN_HOOK_DEBUG=1 node ~/.claude/hooks/openbrain-preload.mjs < <payload file>
+```
+
+**That log cannot see a failure that happens before node starts** — exactly the class the 2026-08-30
+bug belonged to. For those the harness log is the only witness:
+
+```bash
+# under happier-dev:
+ls -t ~/.happier/cli/logs/subprocess/claude/*.log | head -1 | xargs grep -i hook
+# plain terminal: run `claude --debug` and watch for "Hook SessionStart:startup"
+```
+
+`--setting-sources=user,project,local` is passed by happier-dev, so user-level hooks load normally
+there. The harness is not a suspect; check the log before theorising about one.
+
+To run the hook by hand, build the payload with `JSON.stringify` — `echo` and `printf` in Git Bash
+eat the backslashes and produce an invalid `cwd`, which looks exactly like a hook bug:
 
 ```bash
 node -e 'const os=require("os"),p=require("path"),fs=require("fs");const B=String.fromCharCode(92);
@@ -87,10 +143,6 @@ fs.writeFileSync(f,JSON.stringify({cwd:"E:"+B+"GitHub"+B+"openbrain",source:"sta
 # then feed that file to the hook on stdin:
 node ~/.claude/hooks/openbrain-preload.mjs < <that path>
 ```
-
-Note the escaping trap: building that JSON with `echo` or `printf` in Git Bash eats the backslashes
-and produces an invalid `cwd`, which looks exactly like a hook bug. Build it with `JSON.stringify`
-and `String.fromCharCode(92)` as above.
 
 ## How agents reach OpenBrain unprompted
 
@@ -205,6 +257,13 @@ curl --resolve openbrain-mcp.streckercm.com:443:104.21.74.64 https://openbrain-m
 ## Things that cost time
 
 Each of these looked like a different problem than it was.
+
+**A hook `command` with Windows backslashes never runs.** Claude Code executes hook commands
+through bash, which collapses `\n` and `\U` in a path like
+`C:\\nvm4w\\nodejs\\node.exe` down to `C:nvm4wnodejsnode.exe`. The JSON is valid, the hook
+registers, the matcher fires — and the command is not found. A SessionStart hook that exits 0 on
+failure then reports nothing, so it reads as "the harness does not run hooks" rather than "the path
+is mangled." Use forward slashes in `settings.json`; Windows accepts them.
 
 **Build `web-ui` as well as `mcp-gateway`.** The web UI image bakes in `nginx.conf`, and
 `docker compose up -d` reuses an existing image. Build only the gateway and reads keep working while
