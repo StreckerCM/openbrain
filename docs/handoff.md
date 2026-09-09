@@ -17,6 +17,9 @@ PostgREST, Adminer, and the write REST API stay on the LAN. The claude.ai connec
 | `development` | Current work; CT 115 runs from this branch |
 | CT 115 deployed at | `c166360` — two commits behind `development` (`8172df5`) as of 2026-09-08. Both are docs and hook files; nothing deployable changed, so no redeploy is owed. |
 
+Verified live 2026-09-08: `brain.streckercm.com/mcp` answers `tools/list` with all **20** tools, and
+the nine per-repo opt-outs below are still in place.
+
 Deploy phases 0 through 4 are done. Phase 5 has one item left: **send a request from a phone on
 cellular.** Every test so far ran from the LAN or from Anthropic's servers, so that path is
 unproven.
@@ -185,7 +188,7 @@ Three implementation facts worth not rediscovering:
 
 **Per-project gating.** Claude Code records per-directory opt-outs at
 `projects["<path>"].disabledMcpServers` in `~/.claude.json` (path keys use forward slashes). The
-hook reads that same key, so both layers agree. As of 2026-08-30 `openbrain` is disabled in nine
+hook reads that same key, so both layers agree. As of 2026-09-08 `openbrain` is disabled in nine
 Salesforce repos: `APEX-Documentation-Project-FY2026`, `APEX-TestUtility`, `Chris_Dev_Org`,
 `Custom_Product_Configuation_LWC`, `SF-Deployment-GUID`, `Salesforce_to_SharePoint_Integration`,
 `hipoint_App_Integration`, `Salesforce-Sandbox-Utility`, `Salesforce-to-SQL-Server-Interface`.
@@ -310,7 +313,7 @@ directory`. Only Windows clones hit this.
 Items C, D, and E in `docs/superpowers/plans/2026-08-22-remote-mcp-oauth.md` are open. Item C is the
 substantive one.
 
-**C. Move the MCP tools onto `db.py`.** The 20 MCP tools contain 32 raw SQL sites reimplementing
+**C. Move the MCP tools onto `db.py`.** Still fully open; re-counted 2026-09-08. The 20 MCP tools contain 32 raw SQL sites reimplementing
 logic the REST handlers already call through the shared layer, which has 6. Link, unlink, archive,
 unarchive, project create and update, and search each exist twice. An audit on 2026-08-22 found no
 behavioural drift between the copies, but search is where drift would hurt most — a divergence there
@@ -321,7 +324,10 @@ order: link and unlink, then archive and unarchive, then project operations, the
 deliberately whether the search implementations converge on limit, `include_archived`, and the
 filter set, rather than picking one side by accident.
 
-**D. Split `tools.py` and `rest.py`.** Optional and cosmetic once C is done.
+**D. Split `server.py`.** Optional and cosmetic once C is done. Earlier versions of this handoff
+called the targets `tools.py` and `rest.py`; no such files exist and none ever did. Everything is in
+`mcp-gateway/server.py` (1648 lines): the 20 `@mcp.tool` functions first, then the 18 Starlette REST
+routes from line 1038. `db.py` (579 lines) holds the 14 shared `_db_*` helpers both halves call.
 
 **E. Decide how `save_memory` handles duplicates.** It's a plain `INSERT` and `memories.name` has no
 unique constraint, so saving twice with the same name creates two rows. Duplicates dilute search
