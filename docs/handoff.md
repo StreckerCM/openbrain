@@ -1,6 +1,6 @@
 # OpenBrain handoff
 
-**Updated:** 2026-08-31
+**Updated:** 2026-09-08
 
 Read this first if you're picking up OpenBrain work. It covers what's deployed, what's open, and
 the things that cost time to discover.
@@ -12,10 +12,10 @@ PostgREST, Adminer, and the write REST API stay on the LAN. The claude.ai connec
 
 | Item | State |
 |---|---|
-| Open PR | **#22** — `development` → `main`, 43 commits, 91 tests |
+| Open PR | **#22** — `development` → `main`, 46 commits, 91 tests, mergeable. The only open PR. |
 | `main` | Held back deliberately as the revert point |
 | `development` | Current work; CT 115 runs from this branch |
-| CT 115 deployed at | `c166360` — **up to date with `development`** as of 2026-08-30 |
+| CT 115 deployed at | `c166360` — two commits behind `development` (`8172df5`) as of 2026-09-08. Both are docs and hook files; nothing deployable changed, so no redeploy is owed. |
 
 Deploy phases 0 through 4 are done. Phase 5 has one item left: **send a request from a phone on
 cellular.** Every test so far ran from the LAN or from Anthropic's servers, so that path is
@@ -60,50 +60,53 @@ CT 115 is **not** on the tailnet. NPMplus already is. `PRIVATE_BIND` is currentl
 first confirm nothing queries PostgREST directly — `docs/readme.md` advertises it as a second agent
 interface.
 
-## Session preload hook — fixed 2026-08-31, one step short of proven
+## Session preload hook — working, confirmed 2026-09-03
 
-The SessionStart hook wired up on 2026-08-30 **never ran successfully.** It failed on every session
-from the moment it was registered until 2026-08-31, and reported nothing while doing so.
+The harness log records `Hook SessionStart:startup (SessionStart) success` on 2026-09-03, delivering
+3722 characters of `additionalContext`, twice. Project matching was re-verified against this
+directory on 2026-09-08 (`9 projects; "openbrain" matched OpenBrain`), and the hook's own error log
+has never had an entry. Recall is automatic now; treat this as done.
 
-**Root cause: bash ate the backslashes in the `command` string.** `~/.claude/settings.json` held
+One loose end, cosmetic. Both observed successes ran in a directory mapping to no OpenBrain project,
+so they returned the cross-project fallback. A session in `E:\GitHub\openbrain` receiving the
+*project-matched* block has been produced on demand but not yet caught arriving in a live session.
+If you want to close it: open a fresh session here and look for a block headed
+`## OpenBrain (pre-loaded)` naming the **OpenBrain** project.
+
+A quiet skip is normal and looks like this in the harness log — the hook exiting 0 with no output,
+which is what a Salesforce repo with `openbrain` disabled produces:
+
+```
+Hook output does not start with {, treating as plain text
+```
+
+### Why it was dead for four days
+
+Worth keeping, because the failure mode generalises to any hook on Windows.
+
+The hook was registered 2026-08-30 and failed on every session until 2026-08-31.
+`~/.claude/settings.json` held
 
 ```json
 "command": "C:\\nvm4w\\nodejs\\node.exe C:\\Users\\streckercm\\.claude\\hooks\\openbrain-preload.mjs"
 ```
 
-That is correct JSON for a Windows path, and it is still wrong, because Claude Code runs hook
-commands **through bash** — which collapses `\n`, `\U`, `\c` and the rest before anything executes.
-The debug log shows the hook firing on schedule and dying on the first token:
+That is correct JSON for a Windows path and still wrong, because Claude Code runs hook commands
+**through bash**, which collapses `\n`, `\U`, `\c` and the rest before anything executes:
 
 ```
 Hook SessionStart:startup (SessionStart) error:
 /usr/bin/bash: line 1: C:nvm4wnodejsnode.exe: command not found
 ```
 
-This is the same escaping trap documented below for building test JSON in Git Bash. It applies to
-the `command` field too, where it is easier to miss — the JSON looks right, and the hook is
-registered correctly.
-
-**Fix: forward slashes.** Windows accepts them and bash leaves them alone.
+**Fix: forward slashes.** Windows accepts them, bash leaves them alone.
 
 ```json
 "command": "C:/nvm4w/nodejs/node.exe C:/Users/streckercm/.claude/hooks/openbrain-preload.mjs"
 ```
 
-Applied 2026-08-31. The pre-fix file is at `~/.claude/settings.json.bak`. The corrected string was
-run through bash by hand and returns the full `additionalContext` payload.
-
-**What is still unproven:** no real session has consumed that output yet. The script's logic was
-already verified by hand — the positive case returns the OpenBrain project block, the negative case
-(`E:\GitHub\APEX-TestUtility`) returns nothing — but end-to-end delivery into a live context has
-never been observed, because until now the command never executed.
-
-**How to finish the test.** Open a *fresh* session in `E:\GitHub\openbrain` — the hook runs at
-session start, so no session can test its own registration. Near the top of the context you should
-see a block headed `## OpenBrain (pre-loaded)` naming the **OpenBrain** project, followed by that
-project's memories and recent cross-project ones. Ask "what do you already know about this
-project?" — the answer should draw on them with no tool call. Then confirm the negative case in a
-Salesforce repo: no OpenBrain block, no `mcp__openbrain__*` tools.
+The script itself was never at fault — only the invocation. Because the hook exits 0 on every
+failure path it reported nothing, so the symptom was an absent context block and no error anywhere.
 
 **Where to look when it fails.** The hook exits 0 on every failure path — a session must never fail
 to start because the brain host is down — but as of 2026-08-31 it is no longer silent about it.
