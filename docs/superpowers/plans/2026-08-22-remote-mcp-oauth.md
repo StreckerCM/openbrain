@@ -4,7 +4,7 @@
 
 **Goal:** Make OpenBrain's `/mcp` endpoint reachable from the public internet with OAuth 2.1 bearer-token authentication, while confining the web UI, PostgREST, Adminer, and the unauthenticated write API to the LAN and tailnet.
 
-**Architecture:** The gateway becomes an OAuth 2.0 Resource Server. Authentik at `auth.streckercm.com` is the Authorization Server; the gateway validates RS256 JWTs against Authentik's JWKS and never handles credentials. The MCP endpoint and the write REST API move onto separate uvicorn listeners in the same process, so the public ingress has no route to the write API regardless of how it is configured. A `cloudflared` sidecar provides the public path; NPMplus continues to serve LAN and tailnet clients, which is safe because enforcement lives in the application rather than at the edge.
+**Architecture:** The gateway becomes an OAuth 2.0 Resource Server. Authentik at `auth.streckercm.com` is the Authorization Server; the gateway validates RS256 JWTs against Authentik's JWKS and never handles credentials. The MCP endpoint and the write REST API move onto separate uvicorn listeners in the same process; the public ingress is configured to reach only the MCP listener, whose own routing 404s anything outside `/mcp` and the metadata prefix — see Task 9 for what this guarantee does and does not cover. A `cloudflared` sidecar provides the public path; NPMplus continues to serve LAN and tailnet clients, which is safe because enforcement lives in the application rather than at the edge.
 
 **Tech Stack:** Python 3.12, FastMCP (`mcp[http]==1.27.0`), Starlette, uvicorn, asyncpg, httpx, PyJWT with the `crypto` extra, pytest with pytest-asyncio, Docker Compose, cloudflared.
 
@@ -360,9 +360,6 @@ mcp_listener_app = auth.make_mcp_listener(mcp_asgi, _placeholder_metadata)
 # The API listener keeps the existing Starlette app. It is private-only —
 # see the deployment notes; nothing authenticates these routes.
 api_listener_app = rest_app
-
-# Kept so `server:app` still resolves for anything referencing it.
-app = mcp_listener_app
 
 
 async def _serve() -> None:
@@ -1137,7 +1134,17 @@ def bearer_token(authorization: str | None, config: AuthConfig) -> str:
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() != "bearer" or not value.strip():
         raise Unauthorized("expected an Authorization: Bearer credential", config)
-    return value.strip()
+    token = value.strip()
+    if not token.isascii():
+        # A credential the server cannot even parse as a token is an
+        # invalid credential -- 401, not a 500. hmac.compare_digest()
+        # (used by match_static_token) raises TypeError on non-ASCII str
+        # operands, and _header() decodes the raw header bytes as
+        # latin-1, so any non-ASCII byte in the Authorization header
+        # would otherwise reach compare_digest() and escape as an
+        # unhandled exception instead of a clean 401.
+        raise Unauthorized("credential is not a valid bearer token", config)
+    return token
 
 
 def match_static_token(token: str, config: AuthConfig) -> Principal | None:
@@ -1426,6 +1433,33 @@ async def test_raises_when_fetch_fails_with_cold_cache(jwks_server):
     cache = auth.JWKSCache(JWKS_URL, lambda: jwks_server.client)
     with pytest.raises(auth.JWKSUnavailable):
         await cache.get_key(KID)
+
+
+async def test_ttl_expiry_refetch_is_rate_limited_during_outage(jwks_server):
+    """A sustained outage past ttl must not turn every get_key call for an
+    already-cached kid into a fresh outbound fetch attempt: the stale key
+    should keep being served, and fetch attempts should stay bounded by
+    min_refetch_interval, not scale with call count."""
+    clock = FakeClock()
+    cache = auth.JWKSCache(
+        JWKS_URL, lambda: jwks_server.client, ttl=100, min_refetch_interval=30, clock=clock
+    )
+    await cache.get_key(KID)
+    jwks_server.status = 500
+    clock.advance(101)  # past ttl; server is down
+    for _ in range(5):
+        key = await cache.get_key(KID)
+        assert key.key_id == KID
+    # One fetch attempt during the outage window despite 5 calls for a
+    # cached kid -- the TTL path must be rate-limited like the unknown-kid
+    # path, not fire on every request.
+    assert jwks_server.calls == 2
+
+    jwks_server.status = 200
+    clock.advance(31)  # past min_refetch_interval: throttle reopens
+    key = await cache.get_key(KID)
+    assert key.key_id == KID
+    assert jwks_server.calls == 3
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -1439,7 +1473,7 @@ Expected: FAIL — `AttributeError: module 'auth' has no attribute 'JWKSCache'`
 
 - [ ] **Step 4: Implement the cache**
 
-Add `import time` and `import jwt` to the imports in `mcp-gateway/auth.py`, then add:
+Add `import asyncio`, `import time`, and `import jwt` to the imports in `mcp-gateway/auth.py`, then add:
 
 ```python
 class JWKSCache:
@@ -1466,11 +1500,19 @@ class JWKSCache:
         self._keys: dict[str, "jwt.PyJWK"] = {}
         self._fetched_at: float | None = None
         self._last_attempt: float | None = None
+        self._lock = asyncio.Lock()
+        self._fetch_generation = 0
+        self._last_fetch_ok = False
 
     async def _fetch(self) -> bool:
         """Refresh the key set. Returns True on success. Never raises for
         a network or parse failure — the caller decides whether a stale
-        cache is good enough."""
+        cache is good enough.
+
+        Only ever called while holding `_lock` (via `_fetch_once`), so
+        `_last_attempt` and the rest of the cache state change atomically
+        from the point of view of concurrent callers.
+        """
         self._last_attempt = self._clock()
         try:
             response = await self._http_getter().get(self._url, timeout=10.0)
@@ -1478,10 +1520,29 @@ class JWKSCache:
             key_set = jwt.PyJWKSet.from_dict(response.json())
         except Exception as exc:  # network, HTTP, JSON, or key parse
             print(f"[auth] JWKS fetch failed: {exc}", flush=True)
-            return False
-        self._keys = {k.key_id: k for k in key_set.keys if k.key_id}
-        self._fetched_at = self._clock()
-        return True
+            self._last_fetch_ok = False
+        else:
+            self._keys = {k.key_id: k for k in key_set.keys if k.key_id}
+            self._fetched_at = self._clock()
+            self._last_fetch_ok = True
+        self._fetch_generation += 1
+        return self._last_fetch_ok
+
+    async def _fetch_once(self) -> bool:
+        """Serialize concurrent fetch attempts behind a lock, so a burst of
+        requests that all decide a fetch is needed (cold cache, expired
+        cache, or an unknown kid) produces exactly one outbound request.
+
+        A caller that acquires the lock after another coroutine already
+        completed a fetch does not fetch again: it just observes the
+        outcome the winner left behind (`_fetch_generation` having moved
+        on), which is exactly what its own fetch would have produced.
+        """
+        generation_before = self._fetch_generation
+        async with self._lock:
+            if self._fetch_generation == generation_before:
+                return await self._fetch()
+        return self._last_fetch_ok
 
     def _expired(self) -> bool:
         return self._fetched_at is None or (
@@ -1493,17 +1554,43 @@ class JWKSCache:
             self._clock() - self._last_attempt >= self._min_refetch_interval
         )
 
+    def _may_join_or_start_fetch(self) -> bool:
+        """Whether this call should go through `_fetch_once()`: either a
+        fetch is already in flight (join it, uncounted against the rate
+        limit -- it is not a new outbound request) or the rate limit
+        floor allows starting a new one.
+
+        `_lock.locked()` matters because `_last_attempt` is written
+        synchronously at the very start of `_fetch()`, before its first
+        `await`. Without this check, every concurrent caller that hasn't
+        yet reached the lock would see `_may_refetch()` already false
+        because of the in-flight fetch's own `_last_attempt` write, and
+        would raise `JWKSUnavailable` instead of waiting to read the
+        cache the in-flight fetch is about to populate.
+        """
+        return self._lock.locked() or self._may_refetch()
+
     async def get_key(self, kid: str) -> "jwt.PyJWK":
-        if self._expired():
-            # A failure here is survivable if we still hold keys.
-            await self._fetch()
+        if self._expired() and self._may_join_or_start_fetch():
+            # A failure here is survivable if we still hold keys. Gated by
+            # _may_join_or_start_fetch() too: without it, a sustained
+            # outage past ttl would trigger a fresh 10s-timeout fetch
+            # attempt on every request, stalling requests that already
+            # have a valid cached key -- exactly the amplifier
+            # min_refetch_interval exists to prevent, just reached via
+            # the TTL path instead of unknown-kid.
+            await self._fetch_once()
 
         if kid in self._keys:
             return self._keys[kid]
 
         # Unknown kid: the AS may have rotated. Refetch once, rate-limited
         # so junk kids cannot drive unbounded outbound requests.
-        if self._may_refetch() and await self._fetch() and kid in self._keys:
+        if (
+            self._may_join_or_start_fetch()
+            and await self._fetch_once()
+            and kid in self._keys
+        ):
             return self._keys[kid]
 
         raise JWKSUnavailable(f"no signing key for kid={kid!r}")
@@ -1634,9 +1721,56 @@ async def test_garbage_token_rejected(jwt_config, jwks):
 
 async def test_unsigned_token_rejected(jwt_config, jwks):
     # alg=none must never be honoured. PyJWT requires key=None to encode it.
+    # A kid is required so the token reaches jwt.decode() -- otherwise this
+    # test would only prove the kid guard works, not the algorithm allowlist.
     token = jwt.encode(
-        {"sub": "x", "aud": RESOURCE, "iss": ISSUER}, key=None, algorithm="none"
+        {"sub": "x", "aud": RESOURCE, "iss": ISSUER},
+        key=None,
+        algorithm="none",
+        headers={"kid": KID},
     )
+    with pytest.raises(auth.Unauthorized):
+        await auth.validate_jwt(token, jwt_config, jwks)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+async def test_algorithm_confusion_hs256_with_public_key_rejected(
+    jwt_config, jwks, signing_key
+):
+    """Classic RS256-to-HS256 confusion: sign with HS256 using the RSA
+    public key's PEM bytes as the HMAC secret. An attacker can obtain the
+    public key from the JWKS document, so if `algorithms` were ever
+    derived from the token header instead of hardcoded to ["RS256"], this
+    forged token would validate.
+
+    PyJWT's own encoder refuses to build this token (it detects a
+    PEM-shaped HMAC key and raises), so the forgery is assembled by hand
+    to exercise the server's allowlist rather than the client library's
+    unrelated guard.
+    """
+    public_pem = signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    now = int(_time.time())
+    header = {"alg": "HS256", "typ": "JWT", "kid": KID}
+    payload = {
+        "sub": "user-1",
+        "aud": RESOURCE,
+        "iss": ISSUER,
+        "iat": now,
+        "exp": now + 300,
+    }
+    signing_input = (
+        f"{_b64url(json.dumps(header).encode())}."
+        f"{_b64url(json.dumps(payload).encode())}"
+    )
+    signature = hmac.new(public_pem, signing_input.encode(), hashlib.sha256).digest()
+    token = f"{signing_input}.{_b64url(signature)}"
+
     with pytest.raises(auth.Unauthorized):
         await auth.validate_jwt(token, jwt_config, jwks)
 
@@ -1653,7 +1787,11 @@ def test_extract_scopes_when_absent():
     assert auth.extract_scopes({}) == frozenset()
 ```
 
-Add `import jwt` to the top of `tests/test_auth.py`.
+Add `import base64`, `import hashlib`, `import hmac`, `import jwt`, and `from cryptography.hazmat.primitives import serialization` to the top of `tests/test_auth.py` (`json` and `pytest` are already imported there).
+
+The `alg=none` test must carry a `kid` — without one, `validate_jwt` rejects it at the `if not kid` guard before `jwt.decode` ever runs, so the test would pass even if `algorithms` were mistakenly derived from the token header instead of hardcoded. The `alg=HS256`-with-public-key test is the other half of that same regression check: it is the classic RS256-to-HS256 key-confusion attack, and nothing else in the suite exercises it.
+
+Sanity-check both before moving on: temporarily widen `algorithms=["RS256"]` to `algorithms=["RS256", "none", "HS256"]` in `auth.py` and confirm at least the HS256-confusion test breaks (it will raise an unhandled `TypeError` rather than the `Unauthorized` the test expects, because `validate_jwt` always passes the resolved JWKS key object, not raw PEM bytes, to `jwt.decode`). The `alg=none` test may keep passing even under this widening — PyJWT's own `NoneAlgorithm.prepare_key` rejects a non-empty key, and `validate_jwt` always supplies the real resolved signing key, so an unsigned token can never validate through this code path regardless of what the `algorithms` allowlist contains. That is a second, independent line of defense, not a gap in the test. Revert the widening afterwards; do not commit it.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1682,11 +1820,15 @@ async def validate_jwt(token: str, config: AuthConfig, jwks: JWKSCache) -> Princ
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError as exc:
-        raise Unauthorized(f"malformed token: {exc}", config) from exc
+        # The client gets one undifferentiated 401; the detail goes to the
+        # log, not the response.
+        print(f"[auth] token rejected: malformed token: {exc}", flush=True)
+        raise Unauthorized("token rejected", config) from exc
 
     kid = header.get("kid")
     if not kid:
-        raise Unauthorized("token header has no kid", config)
+        print("[auth] token rejected: token header has no kid", flush=True)
+        raise Unauthorized("token rejected", config)
 
     # A failure to resolve the key is JWKSUnavailable, which the middleware
     # renders as 503. Do not convert it to 401 here.
@@ -1894,7 +2036,7 @@ holds instead of re-requesting everything."
 
 ## Task 9: Add the cloudflared sidecar
 
-The tunnel is an outbound connection, so the homelab keeps no listening port on its public interface. The ingress rules are a second line — the first is that cloudflared has no route to port 3002 at all.
+The tunnel is an outbound connection, so the homelab keeps no listening port on its public interface. The ingress rules are the only line of defence against the write API being reached through the tunnel: `cloudflared` and `mcp-gateway` share Compose's default network, so `cloudflared` has the same network-level reachability to port 3002 as it does to 3001. What actually protects the write API is that the ingress rule targets port 3001, whose listener 404s everything outside `/mcp` and the metadata prefix — reaching `/api/*` through the tunnel would require someone to explicitly add a rule naming `:3002`.
 
 **Files:**
 - Create: `cloudflared/config.yml`
@@ -1918,11 +2060,15 @@ tunnel: TUNNEL_ID
 credentials-file: /etc/cloudflared/credentials.json
 
 # Rules match in order; the first match wins and the last rule is the
-# catch-all. cloudflared reaches mcp-gateway over the compose network on
-# port 3001 only — the write API on 3002 is not routable from here.
+# catch-all. cloudflared reaches mcp-gateway over the compose network; it
+# has the same network-level reachability to port 3002 as it does to 3001
+# (Compose's default network has no per-service isolation). What keeps the
+# write API private is that these rules only ever target 3001, whose
+# listener 404s anything outside /mcp and the metadata prefix — exposing
+# /api/* would require someone to add a rule naming :3002 explicitly.
 ingress:
   - hostname: openbrain-mcp.streckercm.com
-    path: ^/mcp$
+    path: ^/mcp/?$
     service: http://mcp-gateway:3001
 
   - hostname: openbrain-mcp.streckercm.com
@@ -1931,6 +2077,10 @@ ingress:
 
   - service: http_status:404
 ```
+
+`^/mcp/?$` (not `^/mcp$`) so a client configured with a trailing slash still reaches the
+gateway — `auth.make_mcp_listener` itself accepts both `/mcp` and `/mcp/`, and the ingress
+rule must not be stricter than the listener it fronts.
 
 - [ ] **Step 2: Add the service to `docker-compose.yml`**
 
@@ -1985,7 +2135,7 @@ Expected: validation passes. It will report the tunnel id as unresolved until a 
 - [ ] **Step 7: Confirm the ingress rules match as intended**
 
 ```bash
-for p in /mcp /api/bulk-delete / /mcp/extra /.well-known/oauth-protected-resource; do
+for p in /mcp /mcp/ /api/bulk-delete / /mcp/extra /.well-known/oauth-protected-resource; do
   echo -n "$p -> "
   docker run --rm -v "$PWD/cloudflared/config.yml:/etc/cloudflared/config.yml:ro" \
     cloudflare/cloudflared:2026.8.1 tunnel --config /etc/cloudflared/config.yml \
@@ -2251,11 +2401,17 @@ Worth a decision: upsert on `(name, project)`, or leave duplicates and dedupe at
   and assert the second returns `{"error": "Project 'X' already exists"}` rather than
   raising. Verify a Sentry event is *not* produced for the second call.
 
-- [ ] **B. Extract `db.py`.** Pure move of `server.py:177-724` — the 14 `_db_*` functions
-  plus the two globals they touch (`ORPHAN_POLICY`, `get_embedding`). No logic changes in
-  this step; verify by imports resolving and existing behavior being untouched. This is
-  the step that makes reuse the path of least resistance, which is the actual fix for the
-  duplication problem.
+- [x] **B. Extract `db.py`.** DONE 2026-08-23 on branch `refactor/extract-db-layer`.
+  Pure move, verified byte-identical: 541 data-layer lines to `db.py`, 15 `get_embedding`
+  lines to a separate `embeddings.py` (an outbound model-provider call is not database
+  access), and `server.py`'s only additions were the import block. `server.py` 2,161 →
+  1,591.
+
+  Two things the plan got wrong here, corrected during the work: the region depends on
+  **three** module-level names, not two — it also uses `VALID_MEMORY_TYPES`, which
+  `server.py` defined 800 lines *below* its first use, legal only because the reference
+  sits inside a function body. And `mcp-gateway/Dockerfile` needed both new modules added
+  to its `COPY` line, the same trap Task 2 hit.
 
 - [ ] **C. Migrate the MCP tools' 32 raw SQL sites onto `db.py`.** One group at a time,
   cheapest and safest first. Write characterization tests against current behavior

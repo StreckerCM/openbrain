@@ -1,0 +1,10 @@
+# Shell scripts are executed inside Linux containers. With core.autocrlf=true
+# (the Windows default) git checks them out with CRLF, which makes the shebang
+# read "#!/bin/sh\r" — the kernel then looks for an interpreter literally named
+# "/bin/sh\r" and the container dies with "no such file or directory".
+# The deployed Linux host never sees this; a Windows clone always does.
+*.sh text eol=lf
+
+# The hook carries a #!/usr/bin/env node shebang; CRLF would break it if it is
+# ever made executable on a Unix host. Same failure mode as the .sh rule above.
+hooks/*.mjs text eol=lf
