@@ -8,7 +8,9 @@ the things that cost time to discover.
 ## Current state
 
 The MCP endpoint is reachable from the public internet with OAuth 2.1 authentication. The web UI,
-PostgREST, Adminer, and the write REST API stay on the LAN. The claude.ai connector works.
+PostgREST, Adminer, and the write REST API stay on the LAN. The static-token front door
+(`brain.streckercm.com`) is healthy. **The claude.ai connector is currently broken — see the next
+section.**
 
 | Item | State |
 |---|---|
@@ -21,8 +23,10 @@ Verified live 2026-09-08: `brain.streckercm.com/mcp` answers `tools/list` with a
 the nine per-repo opt-outs below are still in place.
 
 Deploy phases 0 through 4 are done. Phase 5 has one item left: **send a request from a phone on
-cellular.** Every test so far ran from the LAN or from Anthropic's servers, so that path is
-unproven.
+cellular.** It needs a phone with wifi off and cannot be run from this machine, so it stays open.
+Run it against `brain.streckercm.com` with the static token; testing `openbrain-mcp` is pointless
+until the Access problem above is cleared, since that hostname 302s every request regardless of
+network.
 
 **Shipped 2026-08-30 (PR #23):** `update_memory`, bringing the tool count to **20**. Memories
 previously could only be corrected by archive-and-re-save, which loses the ID and so breaks
@@ -33,6 +37,50 @@ could already write a type outside the vocabulary, and such a row silently drops
 `brain.streckercm.com`: guard rejects, `memory_id` alias works, partial update leaves untouched
 fields alone, and re-embedding regenerates (the edited memory returns at 0.61 similarity for a
 query phrased against its new wording).
+
+## BROKEN — Cloudflare Access is in front of the OAuth hostname (found 2026-09-08)
+
+`openbrain-mcp.streckercm.com` is intercepted by Cloudflare Access at the edge. Every path returns
+a 302 to `streckercm.cloudflareaccess.com/cdn-cgi/access/login/...` before the gateway is reached,
+so the claude.ai connector cannot work. Reproduce:
+
+```bash
+# both return 302 with an HTML Access login redirect
+curl -s -o /dev/null -w "%{http_code}\n" https://openbrain-mcp.streckercm.com/.well-known/oauth-protected-resource
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://openbrain-mcp.streckercm.com/mcp \
+  -H "Authorization: Bearer $STATIC_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# same token, other front door, still 200
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://brain.streckercm.com/mcp \
+  -H "Authorization: Bearer $STATIC_TOKEN" ... 
+```
+
+A valid static token gets 302 too, which is the tell: Access rejects at the edge without consulting
+the gateway, so this is not a token, audience, or scope problem. Discovery is what breaks first —
+an MCP client needs `/.well-known/oauth-protected-resource` to return JSON unauthenticated and
+`/mcp` to return a 401 carrying `WWW-Authenticate`. It gets HTML redirects for both.
+
+**This directly contradicts a decision the design records.** See
+`docs/superpowers/specs/2026-08-22-remote-mcp-oauth-design.md` under "Enforcement must live in the
+application": an earlier Access attempt "appeared to work and enforced nothing," because split DNS
+meant LAN traffic never reached Cloudflare's edge. Token validation was deliberately moved into the
+gateway so enforcement is path-independent. Access in front of this hostname is the configuration
+that decision rejected.
+
+**Fix is in the Cloudflare dashboard, not this repo.** The tunnel on CT 126 is dashboard-managed
+with no local config file, so nothing here needs changing. Remove the Access application covering
+`openbrain-mcp.streckercm.com`, or at minimum add a bypass policy for `/.well-known/*` and `/mcp`.
+Removing it outright matches the design; the gateway already authenticates every request itself.
+
+Two things this session could not establish: **when** it broke, and **whether** Access was added
+deliberately. The claude.ai connector was recorded as working around 2026-08-30, so the change is
+more recent than that.
+
+Also note: local DNS now resolves `openbrain-mcp.streckercm.com` to the Cloudflare addresses
+(104.21.74.64, 172.67.199.236). The `--resolve` workaround documented further down is no longer
+needed from the LAN, and the split-DNS condition that defeated the original Access attempt may no
+longer hold — worth re-checking before drawing conclusions from either.
 
 ## How to reach things
 
